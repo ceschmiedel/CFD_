@@ -2,6 +2,8 @@
 
 Um aplicativo completo de simulação de dinâmica de fluidos computacional (CFD) para análise aerodinâmica de modelos 3D, desenvolvido com Streamlit, FiPy e PyTorch.
 
+ATENÇÂO: Esse MVP simula diversas condições de CFD, porém ainda não resolve cálculos de CFD reais.
+
 ## 🚀 Funcionalidades
 
 ### 📁 Upload e Processamento de Modelos 3D

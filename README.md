@@ -188,5 +188,5 @@ Este projeto é fornecido como está, para fins educacionais e de demonstração
 
 ---
 
-**Desenvolvido com ❤️ usando Python, Streamlit, FiPy e PyTorch**
+**Desenvolvido usando Python, Streamlit, FiPy e PyTorch**
 

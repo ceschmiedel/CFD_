@@ -11,19 +11,25 @@ from fipy import CellVariable, FaceVariable, Grid2D, TransientTerm, DiffusionTer
 class CFDSimulation:
     """Classe principal para simulações CFD usando FiPy"""
     
-    def __init__(self, domain_size=(4.0, 2.0), resolution=(40, 20), device=None):
+    def __init__(self, domain_size=(4.0, 2.0), resolution=(40, 20), device=None,
+                 object_mask=None):
         """
         Inicializa simulação CFD
-        
+
         Args:
             domain_size: Tupla (Lx, Ly) com dimensões do domínio
             resolution: Tupla (nx, ny) com resolução da malha
             device: Dispositivo PyTorch (cuda/cpu) para otimizações
+            object_mask: Máscara booleana (nx*ny) da geometria imersa;
+                         se None, usa aerofólio NACA de fallback
         """
         self.Lx, self.Ly = domain_size
         self.nx, self.ny = resolution
         self.dx = self.Lx / self.nx
         self.dy = self.Ly / self.ny
+        self.external_mask = None
+        if object_mask is not None:
+            self.set_object_mask(object_mask)
         
         # Configurar dispositivo
         if device is None:
@@ -78,6 +84,10 @@ class CFDSimulation:
         # Paredes (topo e fundo): no-slip
         self.u.constrain(0.0, where=self.mesh.facesTop | self.mesh.facesBottom)
         self.v.constrain(0.0, where=self.mesh.facesTop | self.mesh.facesBottom)
+
+        # Pressão: referência (gauge zero) na saída; demais contornos com
+        # gradiente nulo (condição natural do FiPy)
+        self.p.constrain(0.0, where=self.mesh.facesRight)
         
     def add_obstacle(self, center=(1.0, 1.0), radius=0.3):
         """
@@ -99,13 +109,32 @@ class CFDSimulation:
         
         return obstacle_mask
     
+    def set_object_mask(self, mask):
+        """
+        Define a máscara de células sólidas a partir da geometria real
+        (gerada por GeometryProcessor.build_occupancy_mask).
+
+        Args:
+            mask: Array booleano com nx*ny elementos (ordem FiPy, x rápido)
+        """
+        mask = np.asarray(mask).astype(bool).ravel()
+        if mask.size != self.nx * self.ny:
+            raise ValueError(
+                f"Máscara com {mask.size} células; esperado {self.nx * self.ny} "
+                f"({self.nx}x{self.ny})")
+        self.external_mask = mask
+
     def create_object_mask(self):
-        """Cria máscara do objeto baseada na geometria real"""
-        # Por enquanto, usar obstáculo circular melhorado
-        # Em implementação futura, usar geometria STL real
+        """
+        Retorna a máscara do objeto imerso: usa a geometria real carregada
+        quando disponível, senão um aerofólio NACA 0012 de fallback.
+        """
+        if self.external_mask is not None:
+            return self.external_mask
+
         x = self.mesh.cellCenters[0].value
         y = self.mesh.cellCenters[1].value
-        
+
         # Criar obstáculo mais realista (formato de aerofólio)
         center_x, center_y = 1.5, 1.0
         
@@ -128,17 +157,25 @@ class CFDSimulation:
         return mask
     
     def initialize_potential_flow(self, object_mask):
-        """Inicializa campo de velocidade com fluxo potencial"""
+        """Inicializa campo de velocidade com fluxo potencial ao redor
+        do obstáculo real (doublet centrado no centroide da máscara)"""
         x = self.mesh.cellCenters[0].value
         y = self.mesh.cellCenters[1].value
-        
-        # Fluxo potencial ao redor de cilindro (aproximação, vetorizado)
-        dx = x - 1.5  # Centro do objeto
-        dy = y - 1.0
-        r2 = dx**2 + dy**2
 
-        # Doublet de raio efetivo R=0.5 sobreposto ao fluxo uniforme
-        R2 = 0.25
+        object_mask = np.asarray(object_mask).astype(bool)
+        if np.any(object_mask):
+            cx = float(np.mean(x[object_mask]))
+            cy = float(np.mean(y[object_mask]))
+            # raio efetivo do cilindro equivalente à área sólida
+            solid_area = np.count_nonzero(object_mask) * self.dx * self.dy
+            R2 = max(solid_area / np.pi, 1e-4)
+        else:
+            cx, cy = 1.5, 1.0
+            R2 = 0.25
+
+        dx = x - cx
+        dy = y - cy
+        r2 = dx**2 + dy**2
         u_vals = self.inlet_velocity * (1.0 - R2 * (dx**2 - dy**2) / r2**2)
         v_vals = self.inlet_velocity * (-R2 * 2.0 * dx * dy / r2**2)
 
@@ -162,28 +199,63 @@ class CFDSimulation:
         
         return pressure
     
+    def calculate_aero_forces(self, pressure, object_mask):
+        """
+        Calcula forças aerodinâmicas integrando a pressão nas células de
+        fluido adjacentes à superfície do obstáculo.
+
+        Arrasto: diferença de pressão frente/trás integrada por linha.
+        Sustentação: diferença de pressão baixo/cima integrada por coluna.
+
+        Returns:
+            dict: drag_coefficient, lift_coefficient, drag_force, lift_force,
+                  frontal_area (por unidade de profundidade)
+        """
+        p2 = np.asarray(pressure).reshape(self.ny, self.nx)
+        m2 = np.asarray(object_mask).astype(bool).reshape(self.ny, self.nx)
+
+        p_ref = 101325.0
+        drag_force = 0.0
+        lift_force = 0.0
+        n_rows_solid = 0
+
+        # arrasto: para cada linha, pressão imediatamente antes e depois do sólido
+        for j in range(self.ny):
+            cols = np.flatnonzero(m2[j])
+            if cols.size == 0:
+                continue
+            n_rows_solid += 1
+            i0, i1 = cols[0], cols[-1]
+            p_front = p2[j, i0 - 1] if i0 > 0 else p_ref
+            p_back = p2[j, i1 + 1] if i1 < self.nx - 1 else p_ref
+            drag_force += (p_front - p_back) * self.dy
+
+        # sustentação: para cada coluna, pressão logo abaixo e logo acima
+        for i in range(self.nx):
+            rows = np.flatnonzero(m2[:, i])
+            if rows.size == 0:
+                continue
+            j0, j1 = rows[0], rows[-1]
+            p_bottom = p2[j0 - 1, i] if j0 > 0 else p_ref
+            p_top = p2[j1 + 1, i] if j1 < self.ny - 1 else p_ref
+            lift_force += (p_bottom - p_top) * self.dx
+
+        frontal_area = max(n_rows_solid * self.dy, 1e-12)
+        dynamic_pressure = 0.5 * self.rho * self.inlet_velocity**2
+
+        return {
+            'drag_force': drag_force,
+            'lift_force': lift_force,
+            'frontal_area': frontal_area,
+            'drag_coefficient': abs(drag_force) / (dynamic_pressure * frontal_area),
+            'lift_coefficient': lift_force / (dynamic_pressure * frontal_area),
+        }
+
     def calculate_drag_coefficient(self, pressure, object_mask):
         """Calcula coeficiente de arrasto baseado no campo de pressão"""
-        # Integrar pressão na superfície do objeto
-        # Simplificação: usar diferença de pressão média
-        
-        if np.any(object_mask):
-            # Pressão na frente do objeto
-            front_pressure = np.mean(pressure[object_mask])
-            
-            # Pressão de referência
-            ref_pressure = 101325
-            
-            # Força de arrasto aproximada
-            drag_force = (front_pressure - ref_pressure) * 0.5  # Área aproximada
-            
-            # Coeficiente de arrasto
-            dynamic_pressure = 0.5 * self.rho * self.inlet_velocity**2
-            drag_coefficient = drag_force / (dynamic_pressure * 0.5)  # Área de referência
-            
-            return abs(drag_coefficient)
-        else:
+        if not np.any(object_mask):
             return 0.0
+        return self.calculate_aero_forces(pressure, object_mask)['drag_coefficient']
     
     def solve_steady_state(self, max_iterations=100, tolerance=1e-4, progress_callback=None):
         """
@@ -210,33 +282,44 @@ class CFDSimulation:
         start_time = time.time()
         residual = float('inf')
 
+        dt = 0.01  # passo de pseudo-tempo
+
         for iteration in range(max_iterations):
             # Salvar valores anteriores para calcular convergência
             u_old = self.u.value.copy()
             v_old = self.v.value.copy()
-            
-            # Resolver equações de Navier-Stokes simplificadas
-            # Equação de momento em x
-            eq_u = (TransientTerm(var=self.u) + 
-                   ConvectionTerm(coeff=self.velocity, var=self.u) - 
+
+            # Passo 1 (preditor): momento sem gradiente de pressão -> u*
+            eq_u = (TransientTerm(var=self.u) +
+                   ConvectionTerm(coeff=self.velocity, var=self.u) -
                    DiffusionTerm(coeff=self.nu, var=self.u))
-            
-            # Equação de momento em y  
-            eq_v = (TransientTerm(var=self.v) + 
-                   ConvectionTerm(coeff=self.velocity, var=self.v) - 
+
+            eq_v = (TransientTerm(var=self.v) +
+                   ConvectionTerm(coeff=self.velocity, var=self.v) -
                    DiffusionTerm(coeff=self.nu, var=self.v))
-            
-            # Resolver com relaxação
-            eq_u.solve(var=self.u, dt=0.01)
-            eq_v.solve(var=self.v, dt=0.01)
 
-            # Condições de contorno já aplicadas via constrain() (persistem
-            # na variável); reaplicar aqui acumularia restrições duplicadas
+            eq_u.solve(var=self.u, dt=dt)
+            eq_v.solve(var=self.v, dt=dt)
 
-            # Aplicar condição de não-deslizamento no objeto
+            # No-slip no obstáculo antes da projeção
             self.u.setValue(0.0, where=object_mask)
             self.v.setValue(0.0, where=object_mask)
-            
+
+            # Passo 2 (projeção de Chorin): resolver Poisson da pressão
+            # ∇²p = (ρ/dt) ∇·u* para impor incompressibilidade
+            div_star = self.u.grad[0] + self.v.grad[1]
+            p_eq = DiffusionTerm(var=self.p) == (self.rho / dt) * div_star
+            p_eq.solve(var=self.p)
+
+            # Passo 3 (corretor): u = u* - (dt/ρ) ∇p
+            p_grad = self.p.grad
+            self.u.setValue(self.u.value - (dt / self.rho) * p_grad[0].value)
+            self.v.setValue(self.v.value - (dt / self.rho) * p_grad[1].value)
+
+            # Reaplicar não-deslizamento no objeto após a correção
+            self.u.setValue(0.0, where=object_mask)
+            self.v.setValue(0.0, where=object_mask)
+
             # Atualizar campo de velocidade combinado (valores nas faces)
             self._update_face_velocity()
             
@@ -259,11 +342,13 @@ class CFDSimulation:
         # Calcular campos derivados
         velocity_magnitude = np.sqrt(self.u.value**2 + self.v.value**2)
         
-        # Calcular pressão usando equação de Bernoulli modificada
-        pressure = self.calculate_pressure_field(velocity_magnitude)
-        
-        # Calcular coeficiente de arrasto
-        drag_coefficient = self.calculate_drag_coefficient(pressure, object_mask)
+        # Pressão absoluta a partir do campo resolvido pela projeção
+        # (self.p é pressão gauge relativa à saída do túnel)
+        pressure = self.p.value + 101325.0
+
+        # Calcular forças aerodinâmicas na superfície do obstáculo
+        aero = self.calculate_aero_forces(pressure, object_mask)
+        drag_coefficient = aero['drag_coefficient']
         
         # Coordenadas dos eixos (centros de célula), no formato esperado
         # pela camada de visualização: x com nx pontos e y com ny pontos
@@ -283,8 +368,12 @@ class CFDSimulation:
             'mesh_y': y_axis,
             'residuals': self.residuals,
             'drag_coefficient': drag_coefficient,
+            'lift_coefficient': aero['lift_coefficient'],
+            'drag_force': aero['drag_force'],
+            'lift_force': aero['lift_force'],
+            'frontal_area': aero['frontal_area'],
             'iterations': len(self.residuals),
-            'object_mask': object_mask,
+            'object_mask': np.asarray(object_mask).astype(bool),
             'converged': residual < tolerance,
             'final_residual': residual
         }
@@ -370,26 +459,32 @@ def create_simple_simulation(simulation_points=None, device=None):
     sim = CFDSimulation(device=device)
     return sim
 
-def create_gpu_optimized_simulation(domain_size=(4.0, 2.0), resolution=(40, 20)):
+def create_gpu_optimized_simulation(domain_size=(4.0, 2.0), resolution=(40, 20),
+                                    object_mask=None):
     """
-    Cria simulação otimizada para GPU
-    
+    Cria simulação otimizada para o hardware disponível
+
     Args:
         domain_size: Tamanho do domínio
-        resolution: Resolução da malha
-        
+        resolution: Resolução base da malha
+        object_mask: Máscara da geometria imersa (opcional); deve ter sido
+                     gerada na resolução final retornada por esta função —
+                     prefira criar a simulação primeiro e chamar
+                     set_object_mask() com sim.nx/sim.ny
+
     Returns:
         CFDSimulation: Simulação otimizada
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Usar resolução maior se GPU disponível, mas limitada para evitar problemas de memória
+
+    # Resolução maior quando há GPU (a silhueta do modelo precisa de células
+    # suficientes para ser bem representada), moderada em CPU
     if device.type == 'cuda':
-        resolution = (int(min(resolution[0] * 1.5, 60)), int(min(resolution[1] * 1.5, 30)))
+        resolution = (120, 60)
     else:
-        # Para CPU, manter resolução baixa
-        resolution = (30, 15)
-        
-    sim = CFDSimulation(domain_size=domain_size, resolution=resolution, device=device)
+        resolution = (60, 30)
+
+    sim = CFDSimulation(domain_size=domain_size, resolution=resolution,
+                        device=device, object_mask=object_mask)
     return sim
 

@@ -14,7 +14,7 @@ from io import BytesIO
 
 # Importar módulos locais
 from cfd.simulation import CFDSimulation, create_simple_simulation
-from cfd.geometry import GeometryProcessor, process_stl_for_cfd
+from cfd.geometry import GeometryProcessor, process_model_for_cfd
 from cfd.ai_model import CFDAIModel, create_pretrained_model
 from visualization.plots_2d import CFDPlotter2D, display_results_summary, create_comparison_plot
 from visualization.plots_3d import CFDPlotter3D, create_3d_visualization_from_stl
@@ -103,23 +103,25 @@ def create_progress_callback():
     
     return update_progress
 
-def load_stl_file(uploaded_file):
-    """Carrega e processa arquivo STL"""
+def load_model_file(uploaded_file):
+    """Carrega e processa modelo 3D (STL, GLB, GLTF ou OBJ)"""
     try:
-        # Processar STL
-        processor, simulation_points, mesh_info = process_stl_for_cfd(
-            uploaded_file, projection_plane='xy'
+        file_type = uploaded_file.name.rsplit('.', 1)[-1].lower()
+
+        # Processar modelo (vista lateral 'xz': X = fluxo, Z = altura)
+        processor, simulation_points, mesh_info = process_model_for_cfd(
+            uploaded_file, projection_plane='xz', file_type=file_type
         )
-        
+
         # Salvar no estado da sessão
         st.session_state.geometry_processor = processor
         st.session_state.mesh_3d = processor.mesh_3d
         st.session_state.simulation_points = simulation_points
-        
+
         return processor, simulation_points, mesh_info
-        
+
     except Exception as e:
-        st.error(f"Erro ao carregar arquivo STL: {str(e)}")
+        st.error(f"Erro ao carregar modelo 3D: {str(e)}")
         return None, None, None
 
 def run_traditional_simulation(simulation_points, progress_callback=None):
@@ -131,9 +133,25 @@ def run_traditional_simulation(simulation_points, progress_callback=None):
         # Criar simulação otimizada
         from cfd.simulation import create_gpu_optimized_simulation
         sim = create_gpu_optimized_simulation()
-        
+
         # Configurar parâmetros baseados na interface
         sim.inlet_velocity = st.session_state.get('inlet_velocity', 30.0)
+
+        # Imergir a geometria real carregada no domínio (túnel de vento):
+        # rasteriza a silhueta lateral do modelo na grade do solver
+        processor = st.session_state.get('geometry_processor')
+        if processor is not None:
+            try:
+                mask = processor.build_occupancy_mask(
+                    sim.nx, sim.ny,
+                    domain_width=sim.Lx, domain_height=sim.Ly
+                )
+                sim.set_object_mask(mask)
+            except Exception as mask_err:
+                st.warning(
+                    f"Não foi possível usar a geometria carregada como "
+                    f"obstáculo ({mask_err}); usando aerofólio padrão."
+                )
         
         # Executar simulação
         results = sim.solve_steady_state(
@@ -166,6 +184,9 @@ def run_ai_simulation():
         # Verificar se modelo existe
         if st.session_state.ai_model is None:
             with st.spinner("Treinando modelo de IA..."):
+                if torch.cuda.is_available():
+                    # liberar VRAM em cache antes de alocar o modelo
+                    torch.cuda.empty_cache()
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                 st.session_state.ai_model = create_pretrained_model(device=device)
         
@@ -256,17 +277,19 @@ def main():
                     unsafe_allow_html=True)
         
         uploaded_file = st.file_uploader(
-            "Carregue um arquivo STL",
-            type=['stl'],
-            help="Selecione um arquivo STL do modelo 3D para análise aerodinâmica"
+            "Carregue um modelo 3D (STL, GLB, GLTF ou OBJ)",
+            type=['stl', 'glb', 'gltf', 'obj'],
+            help="Selecione um modelo 3D para análise aerodinâmica. "
+                 "A orientação é normalizada automaticamente: o maior eixo "
+                 "vira a direção do fluxo."
         )
-        
+
         if uploaded_file is not None:
-            with st.spinner("Processando arquivo STL..."):
-                processor, simulation_points, mesh_info = load_stl_file(uploaded_file)
-            
+            with st.spinner("Processando modelo 3D..."):
+                processor, simulation_points, mesh_info = load_model_file(uploaded_file)
+
             if processor is not None:
-                st.success("✅ Arquivo STL carregado com sucesso!")
+                st.success("✅ Modelo 3D carregado com sucesso!")
                 
                 # Informações da malha
                 col1, col2 = st.columns(2)
@@ -321,7 +344,7 @@ def main():
                                 st.success("✅ Animação gerada! Use os controles Play/Pause para controlar a animação.")
         
         else:
-            st.info("👆 Carregue um arquivo STL para começar a análise")
+            st.info("👆 Carregue um modelo 3D (STL/GLB) para começar a análise")
             
             # Opção de usar geometria padrão
             if st.button("🔧 Usar Aerofólio NACA Padrão"):

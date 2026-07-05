@@ -31,7 +31,16 @@ class CFDPlotter2D:
         # Tentar diferentes chaves para coordenadas
         x = results.get('x', results.get('mesh_x', np.linspace(0, 4, 40)))
         y = results.get('y', results.get('mesh_y', np.linspace(0, 2, 20)))
-        
+
+        # Normalizar para eixos 1D: resultados da IA trazem meshgrids 2D
+        # (mesh_x/mesh_y), enquanto o solver tradicional traz eixos 1D
+        x = np.asarray(x)
+        y = np.asarray(y)
+        if x.ndim > 1:
+            x = x[0, :]
+        if y.ndim > 1:
+            y = y[:, 0]
+
         return x, y
     
     def plot_geometry_2d(self, vertices, faces=None, title="Geometria 2D"):
@@ -212,7 +221,8 @@ class CFDPlotter2D:
         else:
             X, Y = x, y
             U, V, Vel_mag = u, v, velocity_mag
-        
+            ny, nx = np.asarray(X).shape
+
         # Mascarar velocidades dentro do objeto
         if object_mask is not None:
             if len(object_mask.shape) == 1:
@@ -292,10 +302,12 @@ class CFDPlotter2D:
         
         # Extrair dados baseado no field_name
         if field_name == "velocity":
-            data = results.get('velocity_magnitude', np.sqrt(
-                results.get('u', np.ones_like(x))**2 + 
-                results.get('v', np.zeros_like(y))**2
-            ))
+            if 'velocity_magnitude' in results:
+                data = results['velocity_magnitude']
+            else:
+                u = np.asarray(results.get('u', np.ones(len(x) * len(y))))
+                v = np.asarray(results.get('v', np.zeros(len(x) * len(y))))
+                data = np.sqrt(u**2 + v**2)
             title = "Magnitude da Velocidade"
             colorbar_title = "Velocidade (m/s)"
         elif field_name == "pressure":
@@ -311,7 +323,7 @@ class CFDPlotter2D:
         if len(x.shape) == 1:
             nx, ny = len(x), len(y)
             X, Y = np.meshgrid(x, y)
-            
+
             if len(data.shape) == 1:
                 Z = data.reshape(ny, nx)
             else:
@@ -319,6 +331,7 @@ class CFDPlotter2D:
         else:
             X, Y = x, y
             Z = data
+            ny, nx = np.asarray(X).shape
         
         # Criar figura Plotly
         fig = go.Figure()
@@ -413,22 +426,29 @@ def display_results_summary(results):
         results: Dicionário com resultados da simulação
     """
     st.subheader("📊 Resumo dos Resultados")
-    
-    col1, col2, col3 = st.columns(3)
-    
+
+    col1, col2, col3, col4 = st.columns(4)
+
     with col1:
         # Velocidade máxima
         if 'velocity_magnitude' in results:
             max_vel = np.max(results['velocity_magnitude'])
             st.metric("Velocidade Máxima", f"{max_vel:.2f} m/s")
-        
+
     with col2:
         # Coeficiente de arrasto
         if 'drag_coefficient' in results:
             drag_coef = results['drag_coefficient']
-            st.metric("Coeficiente de Arrasto", f"{drag_coef:.3f}")
-        
+            st.metric("Coef. de Arrasto (Cd)", f"{drag_coef:.3f}")
+
     with col3:
+        # Coeficiente de sustentação (negativo = downforce)
+        if 'lift_coefficient' in results:
+            lift_coef = results['lift_coefficient']
+            st.metric("Coef. de Sustentação (Cl)", f"{lift_coef:.3f}",
+                      help="Negativo indica downforce")
+
+    with col4:
         # Número de iterações
         if 'iterations' in results:
             iterations = results['iterations']

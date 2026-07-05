@@ -11,6 +11,11 @@ from sklearn.preprocessing import StandardScaler
 import pickle
 import os
 
+
+def _is_cuda_oom(err):
+    """Detecta erro de falta de memória CUDA (transitório ou real)"""
+    return isinstance(err, RuntimeError) and 'out of memory' in str(err).lower()
+
 class CFDNet(nn.Module):
     """Rede neural para predição de campos CFD"""
     
@@ -185,57 +190,74 @@ class CFDAIModel:
         if X is None or y is None:
             print("Gerando dados sintéticos para treinamento...")
             X, y = self.generate_training_data()
-        
+
         # Normalizar dados
         X_scaled = self.scaler_input.fit_transform(X)
         y_scaled = self.scaler_output.fit_transform(y)
-        
+
+        try:
+            return self._train_on_device(X_scaled, y_scaled, epochs,
+                                         batch_size, learning_rate)
+        except RuntimeError as err:
+            # GPU sem memória (ex.: VRAM ocupada por outros aplicativos):
+            # o modelo é pequeno, então treinar em CPU é rápido
+            if not (_is_cuda_oom(err) and self.device.type == 'cuda'):
+                raise
+            print("CUDA sem memória — usando CPU para o modelo de IA")
+            torch.cuda.empty_cache()
+            self.device = torch.device('cpu')
+            return self._train_on_device(X_scaled, y_scaled, epochs,
+                                         batch_size, learning_rate)
+
+    def _train_on_device(self, X_scaled, y_scaled, epochs, batch_size,
+                         learning_rate):
+        """Executa o treinamento no dispositivo atual (self.device)"""
         # Converter para tensores PyTorch
         X_tensor = torch.FloatTensor(X_scaled).to(self.device)
         y_tensor = torch.FloatTensor(y_scaled).to(self.device)
-        
+
         # Criar modelo
-        input_size = X.shape[1]
-        output_size = y.shape[1]
+        input_size = X_scaled.shape[1]
+        output_size = y_scaled.shape[1]
         self.model = CFDNet(input_size=input_size, output_size=output_size).to(self.device)
-        
+
         # Otimizador e função de perda
         optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         criterion = nn.MSELoss()
-        
+
         # Dataset e DataLoader
         dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
-        
+
         # Treinamento
         loss_history = []
         self.model.train()
-        
+
         for epoch in range(epochs):
             epoch_loss = 0.0
-            
+
             for batch_X, batch_y in dataloader:
                 optimizer.zero_grad()
-                
+
                 # Forward pass
                 predictions = self.model(batch_X)
                 loss = criterion(predictions, batch_y)
-                
+
                 # Backward pass
                 loss.backward()
                 optimizer.step()
-                
+
                 epoch_loss += loss.item()
-            
+
             avg_loss = epoch_loss / len(dataloader)
             loss_history.append(avg_loss)
-            
+
             if (epoch + 1) % 20 == 0:
                 print(f"Época {epoch + 1}/{epochs}, Perda: {avg_loss:.6f}")
-        
+
         self.is_trained = True
         print("Treinamento concluído!")
-        
+
         return loss_history
     
     def predict(self, X):
@@ -250,21 +272,30 @@ class CFDAIModel:
         """
         if not self.is_trained or self.model is None:
             raise ValueError("Modelo não foi treinado ainda")
-        
+
         self.model.eval()
-        
+
+        X_scaled = self.scaler_input.transform(X)
+
+        try:
+            predictions_scaled = self._predict_on_device(X_scaled)
+        except RuntimeError as err:
+            if not (_is_cuda_oom(err) and self.device.type == 'cuda'):
+                raise
+            print("CUDA sem memória — predição do modelo de IA em CPU")
+            torch.cuda.empty_cache()
+            self.device = torch.device('cpu')
+            self.model = self.model.to(self.device)
+            predictions_scaled = self._predict_on_device(X_scaled)
+
+        # Desnormalizar saída
+        return self.scaler_output.inverse_transform(predictions_scaled)
+
+    def _predict_on_device(self, X_scaled):
+        """Executa a predição no dispositivo atual (self.device)"""
         with torch.no_grad():
-            # Normalizar entrada
-            X_scaled = self.scaler_input.transform(X)
             X_tensor = torch.FloatTensor(X_scaled).to(self.device)
-            
-            # Predição
-            predictions_scaled = self.model(X_tensor).cpu().numpy()
-            
-            # Desnormalizar saída
-            predictions = self.scaler_output.inverse_transform(predictions_scaled)
-        
-        return predictions
+            return self.model(X_tensor).cpu().numpy()
     
     def predict_field(self, domain_size=(4.0, 2.0), resolution=(80, 40), obstacles=None):
         """

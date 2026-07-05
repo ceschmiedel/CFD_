@@ -17,12 +17,60 @@ except ImportError:
     PYVISTA_AVAILABLE = False
     pv = None
 
+def _decimate_for_display(mesh, max_bytes=150_000_000):
+    """
+    Prepara a malha para exibição no navegador sem estourar o limite de
+    mensagem do Streamlit (~400 MB serializado pelo Plotly).
+
+    Só decima quando o tamanho serializado estimado excede o orçamento —
+    modelos típicos (até ~2M de faces) passam inteiros, preservando todos
+    os detalhes. Modelos de F1 são "sopa de triângulos" com milhares de
+    peças finas desconectadas: decimação agressiva os pulveriza, então
+    quando inevitável usa-se colapso suave (aggression=0) e, na falta do
+    decimador, mantêm-se as maiores faces (nunca amostragem aleatória).
+    A física continua usando a malha completa em qualquer caso.
+    """
+    import trimesh
+
+    # coordenadas arredondadas encurtam o JSON (~30%) sem perda visual
+    # (malha normalizada para dimensão 1.0; 5 casas ≈ precisão de 10 µm)
+    verts = np.round(np.asarray(mesh.vertices, dtype=np.float64), 5)
+    faces = np.asarray(mesh.faces)
+
+    # ~9 bytes/coordenada e ~8 bytes/índice no JSON
+    estimated = verts.shape[0] * 3 * 9 + faces.shape[0] * 3 * 8
+
+    if estimated > max_bytes:
+        target = max(int(faces.shape[0] * max_bytes / estimated), 20000)
+        simplified = None
+        try:
+            # aggression=0: colapso conservador (pode parar acima do alvo,
+            # mas preserva muito mais superfície que o padrão)
+            simplified = mesh.simplify_quadric_decimation(
+                face_count=target, aggression=0)
+        except BaseException:
+            pass
+
+        if simplified is not None and len(simplified.faces) > 0:
+            verts = np.round(np.asarray(simplified.vertices), 5)
+            faces = np.asarray(simplified.faces)
+        else:
+            # manter as maiores faces preserva carroceria/painéis e
+            # descarta micro-triângulos (grades, rebites)
+            order = np.argsort(mesh.area_faces)[::-1][:target]
+            sub = mesh.submesh([order], append=True)
+            verts = np.round(np.asarray(sub.vertices), 5)
+            faces = np.asarray(sub.faces)
+
+    return trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+
+
 class CFDPlotter3D:
     """Classe para criação de visualizações 3D de resultados CFD"""
-    
+
     def __init__(self):
         self.fig = None
-        
+
     def plot_mesh_interactive(self, mesh):
         """
         Cria visualização 3D interativa do modelo usando Plotly
@@ -33,6 +81,7 @@ class CFDPlotter3D:
         Returns:
             plotly.graph_objects.Figure: Figura interativa
         """
+        mesh = _decimate_for_display(mesh)
         vertices = mesh.vertices
         faces = mesh.faces
         
@@ -91,9 +140,10 @@ class CFDPlotter3D:
         Returns:
             plotly.graph_objects.Figure: Figura com streamlines
         """
-        vertices = mesh.vertices
-        faces = mesh.faces
-        
+        display_mesh = _decimate_for_display(mesh)
+        vertices = display_mesh.vertices
+        faces = display_mesh.faces
+
         fig = go.Figure()
         
         # Adicionar malha do modelo
@@ -109,55 +159,71 @@ class CFDPlotter3D:
             name='Modelo 3D'
         ))
         
-        # Gerar streamlines sintéticas se não fornecidas
+        # Gerar streamlines sintéticas se não fornecidas.
+        # A malha é canonicalizada na importação (X = eixo longitudinal),
+        # então o fluxo ao longo de +X está sempre alinhado ao modelo.
         if velocity_field is None:
-            # Criar streamlines sintéticas ao redor do modelo
             bounds = mesh.bounds
             x_min, y_min, z_min = bounds[0]
             x_max, y_max, z_max = bounds[1]
-            
-            # Pontos de origem das streamlines
-            n_streams = 20
-            y_start = np.linspace(y_min - 0.5, y_max + 0.5, n_streams)
-            z_start = np.linspace(z_min - 0.3, z_max + 0.3, n_streams)
-            
-            for i, y in enumerate(y_start):
-                for j, z in enumerate(z_start):
-                    # Streamline simples (fluxo em X)
-                    x_stream = np.linspace(x_min - 1.0, x_max + 1.0, 50)
-                    y_stream = np.full_like(x_stream, y)
-                    z_stream = np.full_like(x_stream, z)
-                    
-                    # Adicionar perturbação para simular fluxo ao redor do objeto
-                    center_y = (y_min + y_max) / 2
-                    center_z = (z_min + z_max) / 2
-                    
-                    # Desvio baseado na distância do centro
-                    dist_y = abs(y - center_y)
-                    dist_z = abs(z - center_z)
-                    
-                    if dist_y < (y_max - y_min) / 2 and dist_z < (z_max - z_min) / 2:
-                        # Streamlines que passam perto do objeto são desviadas
-                        deviation = 0.3 * np.exp(-(x_stream - (x_min + x_max)/2)**2 / 0.5)
-                        y_stream += deviation * np.sign(y - center_y)
-                        z_stream += deviation * np.sign(z - center_z)
-                    
-                    # Colorir baseado na velocidade (simulada)
-                    velocity_mag = 1.0 + 0.3 * np.sin(x_stream * 2)
-                    
-                    fig.add_trace(go.Scatter3d(
-                        x=x_stream,
-                        y=y_stream,
-                        z=z_stream,
-                        mode='lines',
-                        line=dict(
-                            color=velocity_mag,
-                            colorscale='Viridis',
-                            width=3
-                        ),
-                        name=f'Streamline {i*len(z_start)+j+1}' if i == 0 and j == 0 else None,
-                        showlegend=True if i == 0 and j == 0 else False
-                    ))
+
+            length = x_max - x_min
+            cy = (y_min + y_max) / 2
+            cz = (z_min + z_max) / 2
+            # semi-eixos da seção transversal do corpo (com folga de 10%)
+            ay = max((y_max - y_min) / 2 * 1.1, 1e-6)
+            az = max((z_max - z_min) / 2 * 1.1, 1e-6)
+            xc = (x_min + x_max) / 2
+
+            n_streams = 9
+            y_seeds = np.linspace(cy - 2.0 * ay, cy + 2.0 * ay, n_streams)
+            z_seeds = np.linspace(cz - 1.6 * az, cz + 1.6 * az, n_streams)
+
+            x_stream = np.linspace(x_min - 0.8 * length,
+                                   x_max + 0.8 * length, 60)
+            # intensidade da deflexão ao longo do corpo (bump gaussiano)
+            bump = np.exp(-((x_stream - xc) / (0.4 * length))**2)
+
+            # Acumular todas as linhas em um único trace usando NaN como
+            # separador (muito mais leve que centenas de traces)
+            xs, ys, zs, speed = [], [], [], []
+
+            for y0 in y_seeds:
+                for z0 in z_seeds:
+                    ry = (y0 - cy) / ay
+                    rz = (z0 - cz) / az
+                    r = np.sqrt(ry**2 + rz**2)
+
+                    if r < 0.15:
+                        continue  # linha colidiria de frente com o corpo
+
+                    # empurrar para fora as linhas que passariam por dentro
+                    # da seção do corpo; decai suavemente para longe dele
+                    push = max(0.0, 1.15 - r)
+                    scale = 1.0 + push * bump
+
+                    y_line = cy + (y0 - cy) * scale
+                    z_line = cz + (z0 - cz) * scale
+
+                    # aceleração local onde o fluxo contorna o corpo
+                    v_line = 1.0 + 0.6 * push * bump
+
+                    xs.extend(x_stream.tolist() + [np.nan])
+                    ys.extend(y_line.tolist() + [np.nan])
+                    zs.extend(z_line.tolist() + [np.nan])
+                    speed.extend(v_line.tolist() + [np.nan])
+
+            fig.add_trace(go.Scatter3d(
+                x=xs, y=ys, z=zs,
+                mode='lines',
+                line=dict(
+                    color=speed,
+                    colorscale='Viridis',
+                    width=3,
+                    colorbar=dict(title='Velocidade relativa')
+                ),
+                name='Streamlines'
+            ))
         
         fig.update_layout(
             title="Modelo 3D com Streamlines",
@@ -188,52 +254,43 @@ class CFDPlotter3D:
         Returns:
             plotly.graph_objects.Figure: Figura com animação
         """
-        vertices = mesh.vertices
-        faces = mesh.faces
+        # A malha é serializada uma única vez (frames só têm partículas)
+        display_mesh = _decimate_for_display(mesh)
+        vertices = display_mesh.vertices
+        faces = display_mesh.faces
         bounds = mesh.bounds
-        
-        # Configurar frames da animação
-        frames = []
-        
-        for frame in range(n_frames):
-            frame_data = []
-            
-            # Adicionar modelo (estático)
-            frame_data.append(go.Mesh3d(
-                x=vertices[:, 0],
-                y=vertices[:, 1],
-                z=vertices[:, 2],
-                i=faces[:, 0],
-                j=faces[:, 1],
-                k=faces[:, 2],
-                color='lightgray',
-                opacity=0.7,
-                name='Modelo'
-            ))
-            
-            # Adicionar partículas do vento (animadas)
+
+        x_min, y_min, z_min = bounds[0]
+        x_max, y_max, z_max = bounds[1]
+
+        # Trace 0: modelo (estático — fica fora dos frames)
+        mesh_trace = go.Mesh3d(
+            x=vertices[:, 0],
+            y=vertices[:, 1],
+            z=vertices[:, 2],
+            i=faces[:, 0],
+            j=faces[:, 1],
+            k=faces[:, 2],
+            color='lightgray',
+            opacity=0.7,
+            name='Modelo'
+        )
+
+        # Posições base das partículas (fixas entre frames; só x anima)
+        n_particles = 100
+        rng = np.random.default_rng(42)
+        x_base = np.linspace(x_min - 2.0, x_max + 2.0, n_particles)
+        y_particles = rng.uniform(y_min - 1.0, y_max + 1.0, n_particles)
+        z_particles = rng.uniform(z_min - 0.5, z_max + 0.5, n_particles)
+
+        def particle_trace(frame):
             time_offset = frame * 0.1
-            
-            # Gerar partículas
-            n_particles = 100
-            x_min, y_min, z_min = bounds[0]
-            x_max, y_max, z_max = bounds[1]
-            
-            # Posições das partículas
-            x_particles = np.linspace(x_min - 2.0, x_max + 2.0, n_particles)
-            y_particles = np.random.uniform(y_min - 1.0, y_max + 1.0, n_particles)
-            z_particles = np.random.uniform(z_min - 0.5, z_max + 0.5, n_particles)
-            
-            # Animar movimento das partículas
-            x_particles = x_particles + time_offset * 2.0
-            
-            # Resetar partículas que saíram do domínio
-            x_particles = np.where(x_particles > x_max + 2.0, x_min - 2.0, x_particles)
-            
-            # Velocidade das partículas (colormap)
+            x_particles = x_base + time_offset * 2.0
+            # recircular partículas que saíram do domínio
+            span = (x_max + 2.0) - (x_min - 2.0)
+            x_particles = (x_particles - (x_min - 2.0)) % span + (x_min - 2.0)
             velocities = 1.0 + 0.5 * np.sin(x_particles + time_offset)
-            
-            frame_data.append(go.Scatter3d(
+            return go.Scatter3d(
                 x=x_particles,
                 y=y_particles,
                 z=z_particles,
@@ -245,13 +302,19 @@ class CFDPlotter3D:
                     opacity=0.8
                 ),
                 name='Partículas do Vento'
-            ))
-            
-            frames.append(go.Frame(data=frame_data, name=str(frame)))
-        
-        # Criar figura inicial
+            )
+
+        # Frames atualizam APENAS o trace das partículas (traces=[1]);
+        # repetir a malha em cada frame multiplicava o tamanho da mensagem
+        # e estourava o limite do Streamlit
+        frames = [
+            go.Frame(data=[particle_trace(f)], traces=[1], name=str(f))
+            for f in range(n_frames)
+        ]
+
+        # Criar figura inicial (malha + primeiro frame de partículas)
         fig = go.Figure(
-            data=frames[0].data,
+            data=[mesh_trace, particle_trace(0)],
             frames=frames
         )
         

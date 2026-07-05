@@ -24,3 +24,11 @@ Thumbs.db
 # Temporários
 *.tmp
 *.log
+
+# Configuração local do Claude Code (permissões por máquina)
+.claude/settings.local.json
+
+# Modelos de exemplo acima do limite de aviso do GitHub (50 MB) —
+# mantidos apenas localmente; use Git LFS se quiser versioná-los
+examples/f12022.glb
+examples/f1flattenedfront.stl

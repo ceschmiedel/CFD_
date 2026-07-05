@@ -1,0 +1,26 @@
+# Ambientes virtuais
+venv/
+.venv/
+env/
+
+# Bytecode Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Modelos treinados / artefatos
+*.pth
+*.pkl
+
+# Streamlit
+.streamlit/secrets.toml
+
+# IDEs e SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temporários
+*.tmp
+*.log

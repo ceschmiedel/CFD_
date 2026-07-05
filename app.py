@@ -377,7 +377,7 @@ def main():
                     
                     # Streamlines
                     if 'streamlines' in results:
-                        fig_stream = plotter.plot_streamlines(results, results['streamlines'])
+                        fig_stream = plotter.plot_streamlines(results)
                         st.pyplot(fig_stream)
                     
                     # Convergência
@@ -468,24 +468,14 @@ def main():
                     diff_percent = abs(cd_ai - cd_trad) / cd_trad * 100
                     st.metric("Diferença (%)", f"{diff_percent:.1f}%")
             
-            # Gráficos de comparação
+            # Gráficos de comparação (velocidade e pressão no mesmo painel)
             st.subheader("🔍 Comparação Visual")
-            
-            # Comparação de velocidade
-            fig_comp_vel = create_comparison_plot(
+
+            fig_comp = create_comparison_plot(
                 st.session_state.cfd_results,
-                st.session_state.ai_results,
-                "velocity"
+                st.session_state.ai_results
             )
-            st.pyplot(fig_comp_vel)
-            
-            # Comparação de pressão
-            fig_comp_press = create_comparison_plot(
-                st.session_state.cfd_results,
-                st.session_state.ai_results,
-                "pressure"
-            )
-            st.pyplot(fig_comp_press)
+            st.plotly_chart(fig_comp, use_container_width=True)
             
         else:
             st.info("ℹ️ Execute ambas as simulações para ver a comparação")

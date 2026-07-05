@@ -6,9 +6,7 @@ Contém classes e funções para simulações de dinâmica de fluidos computacio
 import numpy as np
 import torch
 import time
-from fipy import CellVariable, Grid2D, TransientTerm, DiffusionTerm, ConvectionTerm, DefaultSolver
-from fipy.tools import numerix
-import streamlit as st
+from fipy import CellVariable, FaceVariable, Grid2D, TransientTerm, DiffusionTerm, ConvectionTerm
 
 class CFDSimulation:
     """Classe principal para simulações CFD usando FiPy"""
@@ -58,6 +56,14 @@ class CFDSimulation:
         self.u = CellVariable(name="velocidade_x", mesh=self.mesh, value=self.inlet_velocity)
         self.v = CellVariable(name="velocidade_y", mesh=self.mesh, value=0.0)
         self.p = CellVariable(name="pressao", mesh=self.mesh, value=0.0)
+        # Campo vetorial de velocidade nas faces (coeficiente de convecção)
+        self.velocity = FaceVariable(name="velocidade", mesh=self.mesh, rank=1)
+        self._update_face_velocity()
+
+    def _update_face_velocity(self):
+        """Atualiza o campo vetorial de faces a partir de u e v"""
+        self.velocity[0] = self.u.arithmeticFaceValue
+        self.velocity[1] = self.v.arithmeticFaceValue
         
     def apply_boundary_conditions(self):
         """Aplica condições de contorno"""
@@ -103,26 +109,22 @@ class CFDSimulation:
         # Criar obstáculo mais realista (formato de aerofólio)
         center_x, center_y = 1.5, 1.0
         
-        # Forma de aerofólio NACA aproximada
-        mask = np.zeros_like(x, dtype=bool)
-        for i in range(len(x)):
-            for j in range(len(y)):
-                dx = x[i] - center_x
-                dy = y[j] - center_y
-                
-                # Equação aproximada de aerofólio NACA
-                if abs(dx) < 0.5 and abs(dy) < 0.1:
-                    # Espessura do aerofólio
-                    t = 0.12  # 12% de espessura
-                    if abs(dx) < 0.4:
-                        thickness = t * (0.2969*np.sqrt(abs(dx)/0.4) - 
-                                       0.1260*(abs(dx)/0.4) - 
-                                       0.3516*(abs(dx)/0.4)**2 + 
-                                       0.2843*(abs(dx)/0.4)**3 - 
-                                       0.1015*(abs(dx)/0.4)**4)
-                        if abs(dy) < thickness:
-                            mask[i] = True
-        
+        # Forma de aerofólio NACA aproximada (vetorizado sobre as células)
+        dx = np.abs(x - center_x)
+        dy = np.abs(y - center_y)
+
+        # Meia-espessura NACA 00xx (fórmula padrão, com fator 5) avaliada na
+        # posição relativa da meia-corda e escalada pela corda de 0.8 m
+        t = 0.12       # 12% de espessura (NACA 0012)
+        chord = 0.8    # corda total do obstáculo (m)
+        xi = np.clip(dx / (chord / 2), 0.0, 1.0)
+        thickness = 5 * t * chord * (0.2969 * np.sqrt(xi) -
+                                     0.1260 * xi -
+                                     0.3516 * xi**2 +
+                                     0.2843 * xi**3 -
+                                     0.1015 * xi**4)
+
+        mask = (dx < chord / 2) & (dy < thickness)
         return mask
     
     def initialize_potential_flow(self, object_mask):
@@ -130,28 +132,25 @@ class CFDSimulation:
         x = self.mesh.cellCenters[0].value
         y = self.mesh.cellCenters[1].value
         
-        # Inicializar com fluxo uniforme
-        self.u.setValue(self.inlet_velocity)
-        self.v.setValue(0.0)
-        
-        # Modificar fluxo ao redor do objeto
-        for i in range(len(x)):
-            for j in range(len(y)):
-                if not object_mask[i]:
-                    # Fluxo potencial ao redor de cilindro (aproximação)
-                    dx = x[i] - 1.5  # Centro do objeto
-                    dy = y[j] - 1.0
-                    r = np.sqrt(dx**2 + dy**2)
-                    
-                    if r > 0.1:  # Evitar singularidade
-                        # Velocidade modificada pelo objeto
-                        u_mod = self.inlet_velocity * (1 + 0.25/r**2 * (dx**2 - dy**2))
-                        v_mod = self.inlet_velocity * (0.25/r**2 * 2*dx*dy)
-                        
-                        self.u.setValue(u_mod, where=(self.mesh.cellCenters[0] == x[i]) & 
-                                                    (self.mesh.cellCenters[1] == y[j]))
-                        self.v.setValue(v_mod, where=(self.mesh.cellCenters[0] == x[i]) & 
-                                                    (self.mesh.cellCenters[1] == y[j]))
+        # Fluxo potencial ao redor de cilindro (aproximação, vetorizado)
+        dx = x - 1.5  # Centro do objeto
+        dy = y - 1.0
+        r2 = dx**2 + dy**2
+
+        # Doublet de raio efetivo R=0.5 sobreposto ao fluxo uniforme
+        R2 = 0.25
+        u_vals = self.inlet_velocity * (1.0 - R2 * (dx**2 - dy**2) / r2**2)
+        v_vals = self.inlet_velocity * (-R2 * 2.0 * dx * dy / r2**2)
+
+        # Fluxo uniforme onde está muito perto da singularidade ou dentro do objeto
+        near_singularity = r2 <= 0.01
+        u_vals = np.where(near_singularity, self.inlet_velocity, u_vals)
+        v_vals = np.where(near_singularity, 0.0, v_vals)
+        u_vals = np.where(object_mask, 0.0, u_vals)
+        v_vals = np.where(object_mask, 0.0, v_vals)
+
+        self.u.setValue(u_vals)
+        self.v.setValue(v_vals)
     
     def calculate_pressure_field(self, velocity_magnitude):
         """Calcula campo de pressão usando equação de Bernoulli"""
@@ -206,9 +205,11 @@ class CFDSimulation:
         
         # Inicializar campo de velocidade com fluxo potencial
         self.initialize_potential_flow(object_mask)
-        
+        self._update_face_velocity()
+
         start_time = time.time()
-        
+        residual = float('inf')
+
         for iteration in range(max_iterations):
             # Salvar valores anteriores para calcular convergência
             u_old = self.u.value.copy()
@@ -228,17 +229,16 @@ class CFDSimulation:
             # Resolver com relaxação
             eq_u.solve(var=self.u, dt=0.01)
             eq_v.solve(var=self.v, dt=0.01)
-            
-            # Aplicar condições de contorno
-            self.apply_boundary_conditions()
-            
+
+            # Condições de contorno já aplicadas via constrain() (persistem
+            # na variável); reaplicar aqui acumularia restrições duplicadas
+
             # Aplicar condição de não-deslizamento no objeto
             self.u.setValue(0.0, where=object_mask)
             self.v.setValue(0.0, where=object_mask)
             
-            # Atualizar campo de velocidade combinado
-            self.velocity[0] = self.u
-            self.velocity[1] = self.v
+            # Atualizar campo de velocidade combinado (valores nas faces)
+            self._update_face_velocity()
             
             # Calcular convergência
             du = np.mean(np.abs(self.u.value - u_old))
@@ -265,6 +265,11 @@ class CFDSimulation:
         # Calcular coeficiente de arrasto
         drag_coefficient = self.calculate_drag_coefficient(pressure, object_mask)
         
+        # Coordenadas dos eixos (centros de célula), no formato esperado
+        # pela camada de visualização: x com nx pontos e y com ny pontos
+        x_axis = np.linspace(self.dx / 2, self.Lx - self.dx / 2, self.nx)
+        y_axis = np.linspace(self.dy / 2, self.Ly - self.dy / 2, self.ny)
+
         return {
             'u': self.u.value,
             'v': self.v.value,
@@ -272,53 +277,18 @@ class CFDSimulation:
             'velocity_v': self.v.value,
             'velocity_magnitude': velocity_magnitude,
             'pressure': pressure,
-            'x': self.mesh.cellCenters[0].value,
-            'y': self.mesh.cellCenters[1].value,
-            'mesh_x': self.mesh.cellCenters[0].value,
-            'mesh_y': self.mesh.cellCenters[1].value,
+            'x': x_axis,
+            'y': y_axis,
+            'mesh_x': x_axis,
+            'mesh_y': y_axis,
             'residuals': self.residuals,
             'drag_coefficient': drag_coefficient,
             'iterations': len(self.residuals),
-            'object_mask': object_mask
-        }        
-        # Calcular coeficiente de arrasto (aproximação)
-        drag_force = self.calculate_drag_force(obstacle_mask)
-        drag_coefficient = drag_force / (0.5 * self.rho * self.inlet_velocity**2 * 2 * 0.3)  # Aproximação
-        
-        # Preparar resultados
-        x, y = self.mesh.cellCenters
-        
-        results = {
-            'x': x,
-            'y': y,
-            'u': self.u.value,
-            'v': self.v.value,
-            'p': np.zeros_like(self.u.value),  # Pressão simplificada
-            'velocity_magnitude': velocity_magnitude,
-            'drag_coefficient': drag_coefficient,
-            'residuals': self.residuals,
-            'iterations': iteration + 1,
+            'object_mask': object_mask,
             'converged': residual < tolerance,
             'final_residual': residual
         }
-        
-        return results
-    
-    def calculate_drag_force(self, obstacle_mask):
-        """
-        Calcula força de arrasto no obstáculo
-        
-        Args:
-            obstacle_mask: Máscara do obstáculo
-            
-        Returns:
-            float: Força de arrasto
-        """
-        # Aproximação simples baseada na pressão
-        pressure_on_obstacle = np.mean(self.p.value[obstacle_mask])
-        drag_force = pressure_on_obstacle * 0.6  # Área frontal aproximada
-        return abs(drag_force)
-    
+
     def calculate_streamlines(self, n_streamlines=15):
         """
         Calcula streamlines do campo de velocidade
@@ -415,7 +385,7 @@ def create_gpu_optimized_simulation(domain_size=(4.0, 2.0), resolution=(40, 20))
     
     # Usar resolução maior se GPU disponível, mas limitada para evitar problemas de memória
     if device.type == 'cuda':
-        resolution = (min(resolution[0] * 1.5, 60), min(resolution[1] * 1.5, 30))
+        resolution = (int(min(resolution[0] * 1.5, 60)), int(min(resolution[1] * 1.5, 30)))
     else:
         # Para CPU, manter resolução baixa
         resolution = (30, 15)

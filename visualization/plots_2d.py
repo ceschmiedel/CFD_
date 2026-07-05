@@ -99,9 +99,11 @@ class CFDPlotter2D:
         plt.tight_layout()
         return fig
     
-    def plot_velocity_field(self, results):
+    def plot_velocity_field(self, results, title=None):
         """Plota campo de velocidade"""
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        if title:
+            fig.suptitle(title)
         
         # Extrair dados com fallbacks
         x, y = self._extract_coordinates(results)
@@ -142,9 +144,11 @@ class CFDPlotter2D:
         plt.tight_layout()
         return fig
     
-    def plot_pressure_field(self, results):
+    def plot_pressure_field(self, results, title=None):
         """Plota campo de pressão"""
         fig, ax = plt.subplots(1, 1, figsize=self.fig_size)
+        if title:
+            fig.suptitle(title)
         
         # Extrair coordenadas
         x, y = self._extract_coordinates(results)
@@ -239,9 +243,9 @@ class CFDPlotter2D:
         # Converter para array numpy
         start_points = np.array(start_points)
         
-        # Plotar streamlines
-        streams = ax.streamplot(X, Y, U_masked, V_masked, 
-                               start_points=start_points.T,
+        # Plotar streamlines (start_points no formato (N, 2))
+        streams = ax.streamplot(X, Y, U_masked, V_masked,
+                               start_points=start_points,
                                color='white', 
                                linewidth=1.5,
                                density=1,

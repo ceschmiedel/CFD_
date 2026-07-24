@@ -1,0 +1,251 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CFD2026 — verificação do núcleo LBM</title>
+<style>
+  body { font: 13px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace;
+         background: #0e1014; color: #d6dae2; margin: 0; padding: 24px 28px; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .04em;
+       text-transform: uppercase; color: #7b8496; margin: 0 0 20px; }
+  h2 { font-size: 13px; font-weight: 600; color: #d6dae2;
+       margin: 26px 0 8px; border-bottom: 1px solid #232833; padding-bottom: 6px; }
+  table { border-collapse: collapse; margin: 6px 0 4px; }
+  td { padding: 2px 18px 2px 0; vertical-align: top; }
+  td:first-child { color: #7b8496; }
+  .ok   { color: #4ec9a0; }
+  .fail { color: #f0616d; }
+  .warn { color: #e0af68; }
+  .num  { color: #94c8ff; }
+  pre { background: #14171d; border: 1px solid #232833; border-radius: 4px;
+        padding: 10px 12px; overflow: auto; max-height: 340px; color: #9aa3b2; }
+  details { margin: 8px 0; }
+  summary { cursor: pointer; color: #7b8496; }
+</style>
+<h1>CFD2026 — verificação do núcleo LBM</h1>
+<div id="saida">sondando…</div>
+
+<script type="module">
+import { sondar, presetsPara, BYTES_POR_CELULA } from '../src/backend/caps.js';
+import { SolverWebGPU, TIPO } from '../src/backend/webgpu/solver.js';
+import { Units } from '../src/core/units.js';
+import * as L from '../src/core/lattice.js';
+import { shaderPasso } from '../src/core/emit/wgsl.js';
+
+const out = document.getElementById('saida');
+const html = [];
+const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const push = s => { html.push(s); out.innerHTML = html.join('\n'); };
+const h2 = t => push(`<h2>${esc(t)}</h2>`);
+const linha = (k, v, cls = '') => push(`<table><tr><td>${esc(k)}</td><td class="${cls}">${v}</td></tr></table>`);
+
+const resultados = [];
+function veredito(nome, passou, detalhe) {
+  resultados.push({ nome, passou });
+  linha(nome, `<span class="${passou ? 'ok' : 'fail'}">${passou ? 'PASSOU' : 'FALHOU'}</span> ${detalhe ? `<span style="color:#7b8496">— ${detalhe}</span>` : ''}`);
+}
+
+/* ────────────────────────────────────────────────────────── 0. capacidades */
+
+h2('0 — capacidades desta máquina');
+const caps = await sondar();
+for (const b of caps.backends) {
+  if (!b.disponivel) { linha(b.id, `<span class="warn">indisponível</span> — ${esc(b.motivo)}`); continue; }
+  linha(b.id, `<span class="ok">disponível</span> — ${esc(b.nome)}` +
+    (b.vendor ? ` (${esc(b.vendor)} ${esc(b.arquitetura)})` : '') +
+    (b.renderer ? ` (${esc(b.renderer)})` : ''));
+  linha('  teto', `<span class="num">${(b.maxCells / 1e6).toFixed(1)}M</span> células ` +
+    `= <span class="num">${(b.maxCells * BYTES_POR_CELULA / 1e9).toFixed(1)} GB</span>`);
+  const cabem = presetsPara(b).filter(p => p.cabe).map(p => p.nome).join(', ');
+  linha('  presets', cabem || '<span class="warn">nenhum</span>');
+}
+linha('recomendado', `<span class="ok">${caps.recomendado ?? 'nenhum'}</span>`);
+
+const gpu = caps.backends.find(b => b.id === 'webgpu');
+if (!gpu?.disponivel) {
+  push('<p class="fail">Sem WebGPU: os testes do núcleo não podem rodar aqui.</p>');
+  throw new Error('sem webgpu');
+}
+
+/* Um adaptador so cria UM device: todos os solvers abaixo compartilham este. */
+const device = await SolverWebGPU.criarDevice(gpu.adapter);
+
+/* ───────────────────────────────────────────── 1. lattice (CPU, sem GPU) */
+
+h2('1 — invariantes do conjunto D3Q19 (CPU)');
+try {
+  L.selfCheck();
+  veredito('sum(w)=1, sum(w·c)=0, sum(w·c·c)=c_s²I, opp involutiva', true);
+} catch (e) {
+  veredito('invariantes do lattice', false, e.message);
+}
+
+/* ───────────────────────────────────── 2. shader gerado: forma e tamanho */
+
+h2('2 — shader gerado');
+const fonte = shaderPasso({ nbuf: 1 });
+linha('linhas do kernel de passo', `<span class="num">${fonte.split('\n').length}</span>`);
+linha('laços no kernel', `<span class="num">${(fonte.match(/\bfor\b|\bloop\b/g) || []).length}</span> ` +
+  '<span style="color:#7b8496">(as 19 direções viram código reto)</span>');
+push(`<details><summary>ver WGSL gerado</summary><pre>${esc(fonte)}</pre></details>`);
+
+/* ──────────────────────────────────────────────── 3. escoamento uniforme */
+
+h2('3 — invariância do escoamento uniforme');
+push('<p style="color:#7b8496;margin:4px 0 10px">Escoamento uniforme é solução exata do LBM: ' +
+  'g_i já está em equilíbrio, o streaming traz o mesmo valor de todo vizinho e a colisão não tem o que relaxar. ' +
+  'Qualquer deriva aqui é bug de indexação, não de física — e é o teste que pega streaming trocado de sinal.</p>');
+
+const N1 = { nx: 64, ny: 32, nz: 32 };
+const u0 = [0.05, 0, 0];
+let s = await SolverWebGPU.criar(device, N1);
+linha('lattice', `${N1.nx}×${N1.ny}×${N1.nz} = <span class="num">${(s.N / 1e3).toFixed(0)}k</span> células, ` +
+  `${s.nbuf} buffer(s), ${(s.bytesTotais / 1e6).toFixed(1)} MB`);
+
+s.definirTipos(new Uint32Array(s.N));          // tudo fluido
+s.configurar({ omegaPlus: 1.0, lesCs: 0.0, inletU: u0 });
+s.inicializar();
+s.passo(200);
+s.atualizarMacros();
+let m = await s.lerMacros();
+
+let maxErrU = 0, maxErrD = 0;
+for (let i = 0; i < s.N; i++) {
+  maxErrU = Math.max(maxErrU, Math.abs(m[i * 4] - u0[0]),
+    Math.abs(m[i * 4 + 1]), Math.abs(m[i * 4 + 2]));
+  maxErrD = Math.max(maxErrD, Math.abs(m[i * 4 + 3]));
+}
+linha('erro máx. em u após 200 passos', `<span class="num">${maxErrU.toExponential(2)}</span>`);
+linha('erro máx. em delta', `<span class="num">${maxErrD.toExponential(2)}</span>`);
+veredito('escoamento uniforme preservado ao nível do fp32', maxErrU < 1e-6 && maxErrD < 1e-6,
+  `tolerância 1e-6`);
+s.destruir();
+
+/* ───────────────────────────────── 4. onda de cisalhamento: viscosidade */
+
+h2('4 — decaimento de onda de cisalhamento (mede a viscosidade real)');
+push('<p style="color:#7b8496;margin:4px 0 10px">O teste quantitativo do operador de colisão. ' +
+  'Uma onda u_x = U₀ sin(2πy/L) decai como exp(−ν k² t). Medimos a amplitude, extraímos ν e comparamos ' +
+  'com ν = c_s²(1/ω − ½) — a viscosidade que ω <em>deveria</em> produzir. Se a colisão TRT estiver ' +
+  'errada, os dois números divergem aqui, com LES desligado e sem parede nenhuma para confundir.</p>');
+
+const NY = 64;
+const A0 = 0.02;
+const k = 2 * Math.PI / NY;
+
+const tabela = [];
+for (const omega of [0.6, 1.0, 1.5, 1.8]) {
+  const sv = await SolverWebGPU.criar(device, { nx: 8, ny: NY, nz: 8 });
+  sv.definirTipos(new Uint32Array(sv.N));
+  sv.configurar({ omegaPlus: omega, lesCs: 0.0, inletU: [0, 0, 0] });
+  sv.frente = 'A';
+  sv.definirCampo(
+    (x, y) => ({ delta: 0, u: [A0 * Math.sin(k * y), 0, 0] }),
+    L.equilibrium);
+
+  const T = 400;
+  sv.passo(T);
+  sv.atualizarMacros();
+  const mm = await sv.lerMacros();
+
+  /* Projeta o campo no modo senoidal — imune a offset e a ruído de outros modos. */
+  let acc = 0, norm = 0;
+  for (let z = 0; z < sv.nz; z++) {
+    for (let y = 0; y < sv.ny; y++) {
+      const sn = Math.sin(k * y);
+      for (let x = 0; x < sv.nx; x++) {
+        acc += mm[((z * sv.ny + y) * sv.nx + x) * 4] * sn;
+        norm += sn * sn;
+      }
+    }
+  }
+  const amp = acc / norm;
+
+  const nuTeorico = L.nuFromOmega(omega);
+  const nuMedido = -Math.log(Math.abs(amp) / A0) / (k * k * T);
+  const erro = 100 * (nuMedido - nuTeorico) / nuTeorico;
+  tabela.push({ omega, nuTeorico, nuMedido, erro });
+  sv.destruir();
+}
+
+push('<table><tr><td>ω⁺</td><td>ν teórico</td><td>ν medido</td><td>erro</td></tr>' +
+  tabela.map(r => `<tr><td class="num">${r.omega.toFixed(2)}</td>` +
+    `<td class="num">${r.nuTeorico.toExponential(4)}</td>` +
+    `<td class="num">${r.nuMedido.toExponential(4)}</td>` +
+    `<td class="${Math.abs(r.erro) < 2 ? 'ok' : 'fail'}">${r.erro >= 0 ? '+' : ''}${r.erro.toFixed(2)}%</td></tr>`).join('') +
+  '</table>');
+
+const piorErro = Math.max(...tabela.map(r => Math.abs(r.erro)));
+veredito('viscosidade medida bate com ν(ω)', piorErro < 2,
+  `pior erro ${piorErro.toFixed(2)}%, tolerância 2% (o resto é erro O(k²) do lattice)`);
+
+/* ────────────────────────────────────────── 5. sólido e conservação de massa */
+
+h2('5 — bounce-back: massa conservada e fluido parado dentro do sólido');
+const s3 = await SolverWebGPU.criar(device, { nx: 96, ny: 48, nz: 48 });
+const tipos = new Uint32Array(s3.N);
+let nSolido = 0;
+for (let z = 18; z < 30; z++) for (let y = 18; y < 30; y++) for (let x = 30; x < 42; x++) {
+  tipos[(z * s3.ny + y) * s3.nx + x] = TIPO.SOLIDO; nSolido++;
+}
+s3.definirTipos(tipos);
+s3.configurar({ omegaPlus: 1.2, lesCs: 0.0, inletU: [0.05, 0, 0] });
+s3.inicializar();
+
+s3.atualizarMacros();
+let m0 = await s3.lerMacros();
+let massa0 = 0; for (let i = 0; i < s3.N; i++) massa0 += m0[i * 4 + 3];
+
+s3.passo(500);
+s3.atualizarMacros();
+const m3 = await s3.lerMacros();
+let massa1 = 0; for (let i = 0; i < s3.N; i++) massa1 += m3[i * 4 + 3];
+
+/* velocidade máxima nas células imediatamente atrás do bloco, e checagem de NaN */
+let nan = 0, uMaxDominio = 0;
+for (let i = 0; i < s3.N; i++) {
+  const ux = m3[i * 4], uy = m3[i * 4 + 1], uz = m3[i * 4 + 2], dd = m3[i * 4 + 3];
+  if (!Number.isFinite(ux + uy + uz + dd)) nan++;
+  uMaxDominio = Math.max(uMaxDominio, Math.hypot(ux, uy, uz));
+}
+linha('células sólidas', `<span class="num">${nSolido}</span> de ${s3.N}`);
+linha('massa Σδ inicial → final', `<span class="num">${massa0.toExponential(3)}</span> → <span class="num">${massa1.toExponential(3)}</span>`);
+linha('deriva de massa', `<span class="num">${Math.abs(massa1 - massa0).toExponential(2)}</span>`);
+linha('|u| máx no domínio', `<span class="num">${uMaxDominio.toFixed(4)}</span> ` +
+  `<span style="color:#7b8496">(entrada 0.0500; acelera contornando o bloco)</span>`);
+linha('células não-finitas', nan ? `<span class="fail">${nan}</span>` : '<span class="ok">0</span>');
+
+veredito('sem NaN após 500 passos com obstáculo', nan === 0);
+veredito('massa conservada', Math.abs(massa1 - massa0) < 1e-3 * s3.N * 1e-4 + 1e-4,
+  `deriva ${Math.abs(massa1 - massa0).toExponential(2)}`);
+veredito('escoamento acelera ao contornar o bloco', uMaxDominio > 0.05 && uMaxDominio < 0.15,
+  `|u|max = ${uMaxDominio.toFixed(4)}`);
+s3.destruir();
+
+/* ────────────────────────────────────────────── 6. unidades e honestidade */
+
+h2('6 — ponte de unidades');
+const carro = new Units({ lengthM: 4.5, speedMs: 30, cellsPerLength: 180, rollingRoad: true });
+const r = carro.report();
+linha('carro 4,5 m a 30 m/s, 180 células', '');
+linha('  dx, dt', `<span class="num">${(r.dxM * 1000).toFixed(1)} mm</span>, <span class="num">${(r.dtS * 1e6).toFixed(1)} µs</span>`);
+linha('  Re físico', `<span class="num">${r.rePhysical.toExponential(2)}</span>`);
+linha('  Re do lattice', `<span class="num">${r.reLattice.toExponential(2)}</span>`);
+linha('  razão', `<span class="warn">${r.reRatio.toFixed(0)}×</span>`);
+linha('  ω⁺', `<span class="num">${r.omegaPlus.toFixed(4)}</span> (teto ${r.omegaMax})`);
+linha('  veredito', `<span style="color:#9aa3b2">${esc(r.verdict)}</span>`);
+
+const esfera = new Units({ lengthM: 0.01, speedMs: 0.15, cellsPerLength: 32 });
+linha('esfera de validação Re≈100', `Re_fís <span class="num">${esfera.rePhysical.toFixed(1)}</span>, ` +
+  `Re_lat <span class="num">${esfera.reLattice.toFixed(1)}</span>, ` +
+  `ω⁺ <span class="num">${esfera.omegaPlus.toFixed(4)}</span>`);
+veredito('caso de validação é resolvido diretamente (sem LES)', esfera.resolved);
+veredito('caso do carro é reportado como modelado, não resolvido', !carro.resolved);
+
+/* ─────────────────────────────────────────────────────────────── resumo */
+
+h2('resumo');
+const passou = resultados.filter(r => r.passou).length;
+push(`<p style="font-size:15px">${passou === resultados.length
+  ? `<span class="ok">${passou}/${resultados.length} verificações passaram.</span>`
+  : `<span class="fail">${resultados.length - passou} de ${resultados.length} FALHARAM.</span>`}</p>`);
+window.__resultado = { passou, total: resultados.length, resultados, tabela };
+</script>

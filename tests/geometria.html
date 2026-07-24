@@ -1,0 +1,160 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CFD2026 — verificação da geometria</title>
+<style>
+  body { font: 13px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace;
+         background: #0e1014; color: #d6dae2; margin: 0; padding: 24px 28px; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .04em;
+       text-transform: uppercase; color: #7b8496; margin: 0 0 20px; }
+  h2 { font-size: 13px; font-weight: 600; color: #d6dae2; margin: 24px 0 6px;
+       border-bottom: 1px solid #232833; padding-bottom: 5px; }
+  table { border-collapse: collapse; margin: 4px 0; }
+  td { padding: 1px 16px 1px 0; vertical-align: top; }
+  td:first-child { color: #7b8496; white-space: nowrap; }
+  .ok { color: #4ec9a0; } .fail { color: #f0616d; } .warn { color: #e0af68; }
+  .num { color: #94c8ff; }
+  canvas { image-rendering: pixelated; border: 1px solid #232833;
+           border-radius: 3px; background: #08090c; margin: 6px 8px 2px 0; }
+  .vistas { display: flex; flex-wrap: wrap; align-items: flex-start; }
+  .cap { color: #5d6473; font-size: 11px; margin: 0 8px 10px 0; }
+</style>
+<h1>CFD2026 — verificação da geometria</h1>
+<div id="saida">carregando…</div>
+
+<script type="module">
+import { ler, extentos } from '../src/geom/parse.js';
+import { preparar } from '../src/geom/prepare.js';
+import { voxelizar, areaFrontal, VOXEL } from '../src/geom/voxel.js';
+
+const out = document.getElementById('saida');
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const el = (h) => { const d = document.createElement('div'); d.innerHTML = h; out.appendChild(d); return d; };
+const linha = (k, v) => el(`<table><tr><td>${esc(k)}</td><td>${v}</td></tr></table>`);
+out.textContent = '';
+
+const resultados = [];
+const marcar = (nome, ok, det) => {
+  resultados.push({ nome, ok });
+  linha(nome, `<span class="${ok?'ok':'fail'}">${ok?'PASSOU':'FALHOU'}</span>` +
+    (det ? ` <span style="color:#7b8496">— ${esc(det)}</span>` : ''));
+};
+
+/* Desenha um corte do campo de tipos. Casca em ciano, interior em azul
+ * escuro — ver os dois separados é o que mostra se a inundação vazou. */
+function corte(tipo, g, plano, indice, escala = 1) {
+  let W, H, pega;
+  if (plano === 'xz') { W = g.nx; H = g.nz; pega = (i,j) => tipo[(j*g.ny + indice)*g.nx + i]; }
+  else if (plano === 'xy') { W = g.nx; H = g.ny; pega = (i,j) => tipo[(indice*g.ny + j)*g.nx + i]; }
+  else { W = g.ny; H = g.nz; pega = (i,j) => tipo[(j*g.ny + i)*g.nx + indice]; }
+
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  cv.style.width = (W*escala) + 'px'; cv.style.height = (H*escala) + 'px';
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(W, H);
+  for (let j = 0; j < H; j++) {
+    for (let i = 0; i < W; i++) {
+      const t = pega(i, j);
+      /* origem no canto inferior: z cresce para cima na tela */
+      const o = (((H-1-j)*W) + i) * 4;
+      if (t === VOXEL.CASCA)      { img.data[o]=90;  img.data[o+1]=220; img.data[o+2]=230; }
+      else if (t === VOXEL.DENTRO){ img.data[o]=30;  img.data[o+1]=70;  img.data[o+2]=140; }
+      else                        { img.data[o]=10;  img.data[o+1]=12;  img.data[o+2]=16;  }
+      img.data[o+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return cv;
+}
+
+const MODELOS = [
+  'cube_example.stl',
+  'DeLorean.STL',
+  'audi.stl',
+  'RB16B_FIXED!.stl',
+  'tesla.glb',
+  'ferrari_f75.glb',
+];
+
+import { PRESETS } from '../src/backend/caps.js';
+const PRESET = PRESETS.find(p => p.id === 'baixa');
+const GRADE = { nx: PRESET.nx, ny: PRESET.ny, nz: PRESET.nz };
+el(`<div style="color:#7b8496;margin-bottom:12px">preset <b>${PRESET.nome}</b> — ` +
+  `${GRADE.nx}x${GRADE.ny}x${GRADE.nz} = ${(PRESET.cells/1e6).toFixed(2)}M celulas, ` +
+  `corpo com <b>${PRESET.celulasNoCorpo}</b> celulas de comprimento, ` +
+  `bloqueio tipico ${(PRESET.bloqueioTipico*100).toFixed(1)}%</div>`);
+
+for (const nome of MODELOS) {
+  el(`<h2>${esc(nome)}</h2>`);
+  let buf;
+  try {
+    const r = await fetch('../examples/' + encodeURIComponent(nome));
+    if (!r.ok) { linha('arquivo', `<span class="warn">HTTP ${r.status} — pulando</span>`); continue; }
+    buf = await r.arrayBuffer();
+  } catch (e) { linha('arquivo', `<span class="warn">${esc(e.message)} — pulando</span>`); continue; }
+
+  linha('tamanho', `<span class="num">${(buf.byteLength/1e6).toFixed(2)} MB</span>`);
+
+  let malha;
+  const t0 = performance.now();
+  try { malha = ler(buf, nome); }
+  catch (e) { marcar('leitura', false, e.message); continue; }
+  const tLeitura = performance.now() - t0;
+
+  linha('formato detectado', `<span class="ok">${esc(malha.formato)}</span>` +
+    (malha.nome ? ` <span style="color:#5d6473">“${esc(malha.nome.slice(0,50))}”</span>` : ''));
+  linha('triângulos', `<span class="num">${malha.nTriangulos.toLocaleString('pt-BR')}</span> ` +
+    `<span style="color:#5d6473">(${tLeitura.toFixed(0)} ms)</span>`);
+  for (const a of malha.avisos) linha('  aviso', `<span class="warn">${esc(a)}</span>`);
+
+  const ext = extentos(malha.positions);
+  linha('caixa (arquivo)', `<span class="num">${ext.tamanho.map(t=>t.toPrecision(4)).join(' × ')}</span>` +
+    (ext.naoFinitos ? ` <span class="warn">${ext.naoFinitos} vértices não-finitos</span>` : ''));
+
+  const prep = preparar(malha, GRADE, { celulasPorComprimento: PRESET.celulasNoCorpo });
+  const nomeEixo = ['X','Y','Z'];
+  linha('eixos: fluxo/lateral/vertical', `<span class="num">${prep.eixos.ordem.map(i=>nomeEixo[i]).join(' / ')}</span>` +
+    (prep.eixos.simetrias
+      ? ` <span style="color:#5d6473">simetrias ${prep.eixos.simetrias.map(s=>s.toFixed(3)).join(' ')} · ` +
+        `separação ${prep.eixos.confianca.toFixed(3)}</span>` : ''));
+  linha('unidade adivinhada', `${esc(prep.unidade.nome)} → comprimento ` +
+    `<span class="num">${prep.comprimentoM.toPrecision(4)} m</span>`);
+  for (const a of prep.avisos) linha('  aviso', `<span class="warn">${esc(a)}</span>`);
+
+  const vox = voxelizar(prep.positions, prep.indices, GRADE);
+  const af = areaFrontal(vox.tipo, GRADE);
+  const s = vox.stats;
+
+  linha('voxels: casca / interior', `<span class="num">${s.nCasca.toLocaleString('pt-BR')}</span> / ` +
+    `<span class="num">${s.nDentro.toLocaleString('pt-BR')}</span> ` +
+    `<span style="color:#5d6473">(${(s.fracaoSolida*100).toFixed(2)}% do domínio)</span>`);
+  linha('área frontal', `<span class="num">${af}</span> células² ` +
+    `<span style="color:#5d6473">= bloqueio de ${(100*af/(GRADE.ny*GRADE.nz)).toFixed(2)}%</span>`);
+  linha('tempo', `rasterização <span class="num">${s.msRasterizacao.toFixed(0)} ms</span>, ` +
+    `inundação <span class="num">${s.msInundacao.toFixed(0)} ms</span>`);
+  if (s.ocoSuspeito) linha('  ', `<span class="warn">corpo saiu oco: interior (${s.nDentro}) ` +
+    `muito menor que a casca (${s.nCasca}). Ou é superfície fina, ou a inundação vazou.</span>`);
+
+  const vistas = el('<div class="vistas"></div>');
+  const add = (cv, cap) => {
+    const d = document.createElement('div');
+    d.appendChild(cv);
+    const p = document.createElement('div'); p.className = 'cap'; p.textContent = cap;
+    d.appendChild(p); vistas.appendChild(d);
+  };
+  add(corte(vox.tipo, GRADE, 'xz', GRADE.ny>>1, 2.0), 'perfil (XZ, y central) — fluxo →');
+  add(corte(vox.tipo, GRADE, 'xy', Math.round(GRADE.nz*0.3), 2.0), 'planta (XY, z=30%)');
+  add(corte(vox.tipo, GRADE, 'yz', Math.round(GRADE.nx*0.42), 2.0), 'seção (YZ, x=42%)');
+
+  marcar(`${nome}: geometria produz sólido não-degenerado`,
+    s.nSolido > 200 && s.fracaoSolida < 0.35 && af > 50,
+    `${s.nSolido} células sólidas, área frontal ${af}`);
+}
+
+el('<h2>resumo</h2>');
+const ok = resultados.filter(r=>r.ok).length;
+el(`<p style="font-size:15px">${ok===resultados.length
+  ? `<span class="ok">${ok}/${resultados.length} verificações passaram.</span>`
+  : `<span class="fail">${resultados.length-ok} de ${resultados.length} FALHARAM.</span>`}</p>`);
+window.__geo = { ok, total: resultados.length, resultados };
+</script>

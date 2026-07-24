@@ -43,21 +43,51 @@ import { Q } from '../core/lattice.js';
 export const BYTES_POR_CELULA = Q * 4 * 2;
 
 /*
- * Presets de qualidade. O domínio de um túnel é comprido em x, e as proporções
- * abaixo dão ~8 comprimentos de corpo à frente e atrás, que é o mínimo para a
- * esteira não bater na saída e voltar.
+ * Presets de qualidade.
+ *
+ * As proporções são 10 : 5 : 4, e não são estéticas — são o que mantém o
+ * BLOQUEIO baixo. Bloqueio é a razão entre a área frontal do corpo e a da
+ * seção de teste, e ele infla o arrasto: o ar que não passa pelo corpo tem de
+ * passar pelos lados, acelera, e a sucção resultante puxa o corpo para trás.
+ * Todo túnel real corrige isso (forces.js aplica Maskell), mas a correção só é
+ * confiável até uns 5-10%.
+ *
+ * Com um domínio 2:1:1 e o corpo ocupando um terço do comprimento — que foi a
+ * primeira tentativa aqui — o bloqueio dá 11 a 15%. Fora da faixa em que
+ * qualquer correção vale, antes de o solver executar um passo.
+ *
+ * Com 10 : 5 : 4 e o corpo em nx/10, a seção de teste vale 20 L² contra uma
+ * área frontal típica de veículo de ~0,20 L²: bloqueio de 1%. E sobra 3 L
+ * antes do nariz e 6 L depois da traseira, que é o que a esteira precisa para
+ * não bater na saída e voltar.
+ *
+ * O preço aparece em `celulasNoCorpo`: o comprimento do corpo em células é
+ * nx/10, e é ele — não a contagem total — que determina se um retrovisor
+ * existe na simulação. A interface mostra os dois números.
  */
+const ASPECTO = { x: 10, y: 5, z: 4 };
+
 export const PRESETS = [
-  { id: 'minima', nome: 'Mínima', nx: 128, ny: 64, nz: 64 },
-  { id: 'baixa', nome: 'Baixa', nx: 192, ny: 96, nz: 96 },
-  { id: 'media', nome: 'Média', nx: 256, ny: 128, nz: 128 },
-  { id: 'alta', nome: 'Alta', nx: 384, ny: 192, nz: 192 },
-  { id: 'extrema', nome: 'Extrema', nx: 512, ny: 256, nz: 256 },
-].map(p => ({
-  ...p,
-  cells: p.nx * p.ny * p.nz,
-  bytes: p.nx * p.ny * p.nz * BYTES_POR_CELULA,
-}));
+  { id: 'minima', nome: 'Mínima', nx: 160, ny: 80, nz: 64 },
+  { id: 'baixa', nome: 'Baixa', nx: 240, ny: 120, nz: 96 },
+  { id: 'media', nome: 'Média', nx: 320, ny: 160, nz: 128 },
+  { id: 'alta', nome: 'Alta', nx: 480, ny: 240, nz: 192 },
+  { id: 'extrema', nome: 'Extrema', nx: 640, ny: 320, nz: 256 },
+].map(p => {
+  const cells = p.nx * p.ny * p.nz;
+  const celulasNoCorpo = Math.round(p.nx / ASPECTO.x);
+  return {
+    ...p,
+    cells,
+    bytes: cells * BYTES_POR_CELULA,
+    celulasNoCorpo,
+    /* Estimativa a priori, com a área frontal de um veículo em ~0,20 L². A
+     * área frontal exata sai da voxelização e substitui esta. */
+    bloqueioTipico: 0.20 * celulasNoCorpo ** 2 / (p.ny * p.nz),
+  };
+});
+
+export { ASPECTO };
 
 /**
  * Escolhe o ladrilhamento em Z que deixa o atlas 2D o mais quadrado possível.

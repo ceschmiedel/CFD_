@@ -147,11 +147,29 @@ function declaracoes(nbuf, comMacros) {
 function envolvimento() {
   const L = [];
   L.push('  let nxny = P.dim.x * P.dim.y;');
-  L.push('  // vizinhos envolvidos por eixo: menos um, o próprio, mais um');
+  L.push('  // Vizinhos por eixo, GRAMPEADOS na borda — não periódicos.');
+  L.push('  //');
+  L.push('  // O envolvimento periódico parecia inofensivo: as seis faces do');
+  L.push('  // domínio são células de contorno que sobrescrevem a própria saída,');
+  L.push('  // então o que elas puxam de fora "não importa". Importa muito.');
+  L.push('  // Bounce-back devolve o que CHEGOU — e com o pull periódico o que');
+  L.push('  // chegava ao piso vinha do teto, do outro lado do domínio. O piso');
+  L.push('  // passava a refletir populações do teto para dentro do escoamento,');
+  L.push('  // fechando um laço de realimentação entre as duas faces sem nenhuma');
+  L.push('  // dissipação no caminho.');
+  L.push('  //');
+  L.push('  // Com o túnel vazio isso é invisível: o escoamento é uniforme e o que');
+  L.push('  // vem do teto é idêntico ao que deveria vir. Basta um corpo perturbar');
+  L.push('  // o campo perto do chão para o laço divergir — e ele divergia no mesmo');
+  L.push('  // passo para TODO ω, de 1,82 a 1,98, que é a assinatura de um erro');
+  L.push('  // estrutural e não de um limite de estabilidade.');
+  L.push('  //');
+  L.push('  // Grampear faz a face ler a si mesma: inerte, e o contorno decide o');
+  L.push('  // que sai dali sem consultar o outro lado do mundo.');
   for (const [n, dim] of [['x', 'P.dim.x'], ['y', 'P.dim.y'], ['z', 'P.dim.z']]) {
     L.push(`  let ${n}0 = gid.${n};`);
-    L.push(`  let ${n}m = select(gid.${n} - 1u, ${dim} - 1u, gid.${n} == 0u);`);
-    L.push(`  let ${n}p = select(gid.${n} + 1u, 0u, gid.${n} == ${dim} - 1u);`);
+    L.push(`  let ${n}m = select(gid.${n} - 1u, gid.${n}, gid.${n} == 0u);`);
+    L.push(`  let ${n}p = select(gid.${n} + 1u, gid.${n}, gid.${n} == ${dim} - 1u);`);
   }
   return L;
 }
@@ -210,8 +228,18 @@ export function shaderPasso({ nbuf = 1, escreverMacros = true } = {}) {
 
   if (escreverMacros) {
     L.push('');
-    L.push('  // campo macroscópico para a renderização ler sem refazer a soma');
-    L.push('  macros[cell] = vec4<f32>(u, delta);');
+    L.push('  // Campo macroscópico para a renderização ler sem refazer a soma.');
+    L.push('  //');
+    L.push('  // Zerado dentro do sólido. As populações no interior de um corpo');
+    L.push('  // fechado não têm significado — não há fluido ali, só o que o');
+    L.push('  // bounce-back deixou para trás — e a densidade lá deriva livremente.');
+    L.push('  // Escrevê-las envenena tudo que lê este buffer: as partículas ganham');
+    L.push('  // posições absurdas, e um diagnóstico que varra o domínio inteiro');
+    L.push('  // acusa divergência olhando para células que nunca foram escoamento.');
+    L.push('  // (Foi o que aconteceu aqui: |u| = 3,02 dentro do carro enquanto o');
+    L.push('  // fluido estava em 0,0707.)');
+    L.push('  let ehSol = ct == 1u || ct == 4u || ct == 7u;');
+    L.push('  macros[cell] = select(vec4<f32>(u, delta), vec4<f32>(0.0), ehSol);');
   }
   L.push('}');
   return L.join('\n');
@@ -320,7 +348,9 @@ export function shaderForcas({ nbuf = 1 } = {}) {
     L.push(`      {`);
     L.push(`        let nb = ${d.vizinho(c[0], c[1], c[2])};`);
     L.push(`        let tb = tipo[nb];`);
-    L.push(`        if (tb == ${TIPO.SOLIDO}u || tb == ${TIPO.SOLIDO_MOVEL}u) {`);
+    /* SOMENTE o corpo. O piso e as paredes do túnel refletem igual mas não
+     * entram na conta — ver o cabeçalho de CELULA em ir.js. */
+    L.push(`        if (tb == ${TIPO.SOLIDO}u) {`);
     L.push(`          let q = ${d.lerPop(i, 'cell')} + ${d.lerPop(j, 'nb')} + ${num(2 * W[i])};`);
     const termos = [];
     for (let a = 0; a < 3; a++) {

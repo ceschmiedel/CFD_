@@ -53,8 +53,12 @@ export function montarTipos({
     }
   }
 
-  /* 2. as paredes, por cima */
-  const piso = esteira ? CELULA.SOLIDO_MOVEL : CELULA.SOLIDO;
+  /* 2. as paredes, por cima.
+   *
+   * PAREDE e não SOLIDO quando a esteira está desligada: os dois refletem
+   * igual, mas SOLIDO é o corpo e entra na soma de forças. Um piso marcado
+   * como corpo faz o arrasto do chão engolir o do carro. */
+  const piso = esteira ? CELULA.SOLIDO_MOVEL : CELULA.PAREDE;
   const idx = (x, y, z) => (z * ny + y) * nx + x;
 
   for (let z = 0; z < nz; z++) {

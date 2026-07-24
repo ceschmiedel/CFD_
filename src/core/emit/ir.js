@@ -56,15 +56,27 @@ import { Q, C, W, OPP, CS2, INV_CS2, INV_CS4, MAGIC } from '../lattice.js';
  *
  * O PISO é o oposto — ele existe, e é SOLIDO_MOVEL quando a esteira está
  * ligada. Essa assimetria entre piso e teto é a geometria real do problema.
+ *
+ * SOLIDO é o CORPO, e só ele. PAREDE é uma parede de túnel parada, com
+ * exatamente o mesmo bounce-back. A distinção não é numérica — é contábil, e é
+ * a diferença entre um coeficiente e um número sem sentido.
+ *
+ * O cálculo de força soma sobre os links que cruzam uma superfície sólida. Se
+ * o piso do túnel for do mesmo tipo que o carro, ele entra na soma: o piso tem
+ * nx*ny células de superfície contra alguns milhares do corpo, e o resultado é
+ * o arrasto do CHÃO, com o carro como ruído. Medimos exatamente isso antes da
+ * separação existir — o coeficiente de sustentação saiu em -81 112, e a única
+ * pista de que estava errado era a magnitude.
  */
 export const CELULA = {
   FLUIDO: 0,
-  SOLIDO: 1,
+  SOLIDO: 1,          // o corpo: bounce-back E contabilizado nas forças
   ENTRADA: 2,
   SAIDA: 3,
-  SOLIDO_MOVEL: 4,
+  SOLIDO_MOVEL: 4,    // esteira rolante: bounce-back com parede móvel, sem força
   ESPELHO_Y: 5,
   ESPELHO_Z: 6,
+  PAREDE: 7,          // parede de túnel parada: bounce-back, sem força
 };
 
 /**
@@ -414,7 +426,8 @@ export function emitirPasso(d, { comEsponja = true } = {}) {
     L.push(...corpo.map(s => d.indentar(s)));
   };
 
-  ramo(d.ehTipo('SOLIDO') + ' || ' + d.ehTipo('SOLIDO_MOVEL'), blocoBounceBack(d));
+  ramo([d.ehTipo('SOLIDO'), d.ehTipo('SOLIDO_MOVEL'), d.ehTipo('PAREDE')].join(' || '),
+    blocoBounceBack(d));
   ramo(d.ehTipo('ESPELHO_Y'), blocoEspelho(d, 1));
   ramo(d.ehTipo('ESPELHO_Z'), blocoEspelho(d, 2));
   ramo(d.ehTipo('ENTRADA'), blocoEntrada(d));

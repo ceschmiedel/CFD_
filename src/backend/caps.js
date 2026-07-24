@@ -292,16 +292,28 @@ export function presetsPara(backend) {
 }
 
 /**
- * Preset inicial: o maior que cabe, recuado um degrau.
+ * Orçamento confortável de VRAM para a escolha automática.
  *
- * O recuo é deliberado. O maior preset que "cabe" pelos limites declarados é
- * exatamente o que tem mais chance de falhar na alocação real ou de render a
- * 5 fps, e a primeira impressão de quem abre o link é a que conta. Quem quiser
- * o teto escolhe o teto — a opção está lá, marcada.
+ * Não é o teto: é o ponto abaixo do qual a alocação é rápida e sobra memória
+ * para a renderização, as partículas e o navegador. O teto declarado pelo
+ * adaptador nesta máquina é de 25 GB numa placa de 16 — usá-lo como guia para
+ * o preset inicial escolheria 22 milhões de células, o que significa alocar
+ * 3,4 GB toda vez que o usuário mexe num controle que remonta o domínio.
+ */
+export const ORCAMENTO_CONFORTAVEL = 1.5e9;
+
+/**
+ * Preset inicial: o maior que cabe no orçamento confortável.
+ *
+ * Deliberadamente conservador. O maior preset que "cabe" pelos limites
+ * declarados é exatamente o que tem mais chance de falhar na alocação real ou
+ * de renderizar a 5 fps, e a primeira impressão de quem abre o link é a que
+ * conta. Quem quiser o teto escolhe o teto — a opção está na lista, marcada
+ * com o tamanho e o número de células no corpo.
  */
 export function presetInicial(backend) {
   const cabem = presetsPara(backend).filter(p => p.cabe);
   if (!cabem.length) return null;
-  const i = Math.max(0, cabem.length - 2);
-  return cabem[i];
+  const confortaveis = cabem.filter(p => p.bytes <= ORCAMENTO_CONFORTAVEL);
+  return confortaveis.length ? confortaveis[confortaveis.length - 1] : cabem[0];
 }

@@ -300,6 +300,40 @@ export class SolverWebGPU {
     this.device.queue.writeBuffer(this.tipo, 0, tipos);
   }
 
+  /**
+   * Parte do repouso e acelera até a velocidade pedida ao longo de `passos`.
+   *
+   * POR QUE NÃO SE LIGA O TÚNEL DE UMA VEZ
+   * --------------------------------------
+   * Inicializar o domínio inteiro com escoamento uniforme e um carro já dentro
+   * dele é ligar o vento instantaneamente: no primeiro passo o ar bate no
+   * nariz a 30 m/s e nasce um pulso de pressão que atravessa o domínio. Num
+   * lattice a ω = 1,98 a viscosidade molecular é ~1,7e-3 e esse pulso quase
+   * não amortece — ele reverbera entre o corpo e os contornos e cresce.
+   *
+   * Medido aqui, com um Tesla a 32 células: no passo 200 o desvio de densidade
+   * já era de 5,7% (contra os ~1e-4 do regime), e entre os passos 200 e 800
+   * mais da metade das células de fluido virava NaN. O solver não estava
+   * errado; a partida estava.
+   *
+   * A rampa resolve porque a escala de tempo do transiente passa a ser a da
+   * rampa, e não um degrau. Uma travessia do domínio é generoso e custa pouco:
+   * é tempo que o escoamento levaria para se estabelecer de qualquer maneira.
+   */
+  rampa(passos, aplicarVelocidade) {
+    this._rampa = { passos, aplicar: aplicarVelocidade, atual: 0 };
+  }
+
+  /** Fração da velocidade final neste instante da rampa (1 quando terminou). */
+  get fatorRampa() {
+    const r = this._rampa;
+    if (!r || r.atual >= r.passos) return 1;
+    /* Suavizada nas duas pontas: uma rampa linear tem um degrau de aceleração
+     * no início e outro no fim, e degraus de aceleração também geram pulso. */
+    const t = r.atual / r.passos;
+    return t * t * (3 - 2 * t);
+  }
+
   /** Preenche o domínio com o equilíbrio da corrente livre. */
   inicializar() {
     const enc = this.device.createCommandEncoder();
@@ -311,6 +345,7 @@ export class SolverWebGPU {
     this.device.queue.submit([enc.finish()]);
     this.frente = 'B';
     this.passos = 0;
+    if (this._rampa) this._rampa.atual = 0;
   }
 
   /**
@@ -358,6 +393,13 @@ export class SolverWebGPU {
   /** Avança `n` passos. Um único command encoder para os n — o custo de
    *  submeter domina o de despachar quando o lattice é pequeno. */
   passo(n = 1) {
+    /* Avanca a rampa antes de despachar: o chamador reconfigura o uniforme
+       com o fator novo e so entao os n passos rodam. */
+    const r = this._rampa;
+    if (r && r.atual < r.passos) {
+      r.atual += n;
+      r.aplicar?.(this.fatorRampa);
+    }
     const enc = this.device.createCommandEncoder();
     const p = enc.beginComputePass();
     p.setPipeline(this.pipePasso);
@@ -409,6 +451,38 @@ export class SolverWebGPU {
    *
    * @returns {Promise<number[]>} [fx, fy, fz]
    */
+  /**
+   * Mede a força de repouso e passa a subtraí-la de toda medida seguinte.
+   *
+   * POR QUE UM CORPO PARADO EM FLUIDO PARADO SENTE FORÇA
+   * ----------------------------------------------------
+   * Em repouso g_i = 0, logo f_i = w_i, e a soma de troca de momento vale
+   *
+   *     F = soma_links c_i (w_i + w_ī) = soma_links 2 w_i c_i
+   *
+   * Numa superfície FECHADA isso é exatamente zero: cada direção que sai do
+   * corpo num ponto tem a oposta saindo do outro lado, e os termos se cancelam
+   * aos pares. Mas um carro repousa sobre o piso, e a parte da carroceria que
+   * encosta nele não tem fluido do outro lado — aqueles links não existem. A
+   * soma deixa de fechar e sobra uma força constante, para baixo, que não é
+   * física nenhuma.
+   *
+   * Medimos: com um Tesla a 32 células, ela dava fz = -30,15 em unidades de
+   * lattice — um coeficiente de sustentação de -146 antes de o escoamento
+   * sequer começar. A magnitude absurda foi a única pista.
+   *
+   * A correção é subtrair o valor medido no estado zerado. Vale para qualquer
+   * geometria, incluindo as que encostam em mais de uma parede, e some sozinha
+   * quando o corpo está inteiramente imerso (o offset dá zero e a subtração é
+   * inócua). Tem de ser chamada DEPOIS de definirTipos e ANTES de inicializar,
+   * porque só aí os buffers ainda estão zerados.
+   */
+  async calibrarRepouso() {
+    this.offsetForca = [0, 0, 0];
+    this.offsetForca = await this.medirForcas();
+    return this.offsetForca;
+  }
+
   async medirForcas() {
     const enc = this.device.createCommandEncoder();
     const p = enc.beginComputePass();
@@ -429,7 +503,8 @@ export class SolverWebGPU {
     await this.leituraForca.mapAsync(GPUMapMode.READ);
     const v = new Float32Array(this.leituraForca.getMappedRange().slice(0));
     this.leituraForca.unmap();
-    return [v[0], v[1], v[2]];
+    const o = this.offsetForca ?? [0, 0, 0];
+    return [v[0] - o[0], v[1] - o[1], v[2] - o[2]];
   }
 
   /** Recalcula macros a partir do estado atual sem avançar o tempo. */

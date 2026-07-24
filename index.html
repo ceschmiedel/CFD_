@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="pt-BR">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CFD2026 — túnel de vento</title>
+<style>
+  :root {
+    --fundo: #0b0d11; --painel: #12151b; --borda: #222833;
+    --texto: #d6dae2; --fraco: #7b8496; --tenue: #545c6b;
+    --ok: #4ec9a0; --alerta: #e0af68; --erro: #f0616d; --dado: #94c8ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--fundo); color: var(--texto); overflow: hidden;
+    font: 12px/1.55 ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+    display: grid; grid-template-columns: 268px 1fr;
+  }
+  aside { background: var(--painel); border-right: 1px solid var(--borda);
+          overflow-y: auto; padding: 14px 14px 40px; }
+  main { position: relative; }
+  canvas { width: 100%; height: 100%; display: block; }
+
+  h1 { font-size: 12px; letter-spacing: .14em; text-transform: uppercase;
+       color: var(--texto); margin: 0 0 2px; font-weight: 600; }
+  .sub { color: var(--tenue); font-size: 10.5px; margin-bottom: 16px; letter-spacing: .04em; }
+  h2 { font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+       color: var(--tenue); margin: 18px 0 7px; font-weight: 600;
+       border-bottom: 1px solid var(--borda); padding-bottom: 5px; }
+
+  label { display: block; color: var(--fraco); margin: 9px 0 3px; }
+  .val { color: var(--dado); float: right; }
+  select, input[type=file], button {
+    width: 100%; background: #0b0d11; color: var(--texto);
+    border: 1px solid var(--borda); border-radius: 3px; padding: 5px 7px;
+    font: inherit; cursor: pointer;
+  }
+  select:hover, button:hover { border-color: #39424f; }
+  button.primaria { background: #1b2734; border-color: #2c4055; color: #cfe6ff; }
+  input[type=range] { width: 100%; accent-color: #4a7fb5; margin: 2px 0 0; }
+  .linha { display: flex; gap: 6px; }
+  .chk { display: flex; align-items: center; gap: 7px; color: var(--fraco);
+         margin: 7px 0; cursor: pointer; }
+  .chk input { accent-color: #4a7fb5; cursor: pointer; }
+
+  .medida { display: flex; justify-content: space-between; align-items: baseline;
+            padding: 3px 0; border-bottom: 1px dotted #1c212a; }
+  .medida b { color: var(--dado); font-weight: 600; font-size: 15px;
+              font-variant-numeric: tabular-nums; }
+  .medida span:first-child { color: var(--fraco); }
+  .erro-barra { color: var(--tenue); font-size: 10.5px; }
+
+  #veredito { color: var(--tenue); font-size: 10.5px; line-height: 1.5;
+              margin-top: 9px; padding: 7px 8px; background: #0e1116;
+              border-left: 2px solid #2a3442; border-radius: 0 3px 3px 0; }
+  .aviso { color: var(--alerta); }
+  .ruim { color: var(--erro); }
+  .bom { color: var(--ok); }
+
+  #hud { position: absolute; top: 12px; left: 14px; pointer-events: none;
+         color: var(--tenue); font-size: 10.5px; line-height: 1.7; }
+  #hud b { color: var(--dado); font-variant-numeric: tabular-nums; }
+  #estado { position: absolute; bottom: 12px; left: 14px; color: var(--tenue);
+            font-size: 10.5px; pointer-events: none; }
+  #carregando { position: absolute; inset: 0; display: grid; place-items: center;
+                background: rgba(11,13,17,.9); color: var(--fraco); font-size: 12px; }
+  a { color: #7fa9d8; }
+</style>
+
+<aside>
+  <h1>CFD2026</h1>
+  <div class="sub">túnel de vento · LBM D3Q19 na GPU</div>
+
+  <h2>execução</h2>
+  <label>Backend <span class="val" id="vBackend">—</span></label>
+  <select id="backend"></select>
+  <label>Resolução <span class="val" id="vPreset">—</span></label>
+  <select id="preset"></select>
+  <div class="linha" style="margin-top:9px">
+    <button id="rodar" class="primaria">⏸ pausar</button>
+    <button id="reiniciar">↺ reiniciar</button>
+  </div>
+
+  <h2>modelo</h2>
+  <select id="modelo"></select>
+  <label style="margin-top:8px">ou carregue um arquivo (STL, OBJ, PLY, GLB)</label>
+  <input type="file" id="arquivo" accept=".stl,.obj,.ply,.glb,.gltf">
+  <label>Comprimento real <span class="val" id="vComp">—</span></label>
+  <input type="range" id="comprimento" min="0.5" max="12" step="0.1" value="4.5">
+
+  <h2>escoamento</h2>
+  <label>Velocidade <span class="val" id="vVel">30 m/s</span></label>
+  <input type="range" id="velocidade" min="5" max="90" step="1" value="30">
+  <label>Guinada <span class="val" id="vGuinada">0°</span></label>
+  <input type="range" id="guinada" min="-20" max="20" step="1" value="0">
+  <label class="chk"><input type="checkbox" id="esteira" checked> esteira rolante</label>
+  <label class="chk"><input type="checkbox" id="les" checked> LES Smagorinsky</label>
+
+  <h2>medidas</h2>
+  <div class="medida"><span>C<sub>d</sub></span><b id="cd">—</b></div>
+  <div class="erro-barra" id="cdErro">acumulando amostras…</div>
+  <div class="medida"><span>C<sub>l</sub></span><b id="cl">—</b></div>
+  <div class="medida"><span>arrasto</span><b id="arrasto">—</b></div>
+  <div class="medida"><span>área frontal</span><b id="area">—</b></div>
+  <div class="medida"><span>bloqueio</span><b id="bloqueio">—</b></div>
+  <div id="veredito">—</div>
+
+  <h2>visualização</h2>
+  <label class="chk"><input type="checkbox" id="oEsteiras" checked> esteiras de partículas</label>
+  <label class="chk"><input type="checkbox" id="oCorpo" checked> carroceria</label>
+  <label class="chk"><input type="checkbox" id="oCp" checked> pintar C<sub>p</sub> na superfície</label>
+  <label>Ganho do C<sub>p</sub> <span class="val" id="vGanho">1,0×</span></label>
+  <input type="range" id="ganho" min="0.2" max="4" step="0.1" value="1">
+
+  <h2>verificação</h2>
+  <div style="color:var(--tenue);line-height:1.7">
+    <a href="tests/validacao.html" target="_blank">validação vs correlações</a><br>
+    <a href="tests/nucleo.html" target="_blank">núcleo LBM</a><br>
+    <a href="tests/geometria.html" target="_blank">geometria</a><br>
+    <a href="tests/desempenho.html" target="_blank">desempenho</a>
+  </div>
+</aside>
+
+<main>
+  <canvas id="tela"></canvas>
+  <div id="hud"></div>
+  <div id="estado"></div>
+  <div id="carregando">iniciando…</div>
+</main>
+
+<script type="module">
+import { sondar, PRESETS, presetsPara, presetInicial } from './src/backend/caps.js';
+import { SolverWebGPU } from './src/backend/webgpu/solver.js';
+import { Units, stepsForFlowthrough } from './src/core/units.js';
+import { montarTipos, areaFrontalCorpo } from './src/core/tunel.js';
+import { voxelizar } from './src/geom/voxel.js';
+import { ler } from './src/geom/parse.js';
+import { preparar } from './src/geom/prepare.js';
+import { coeficientes, JanelaCd } from './src/core/forces.js';
+import { Renderer } from './src/render/renderer.js';
+
+const $ = id => document.getElementById(id);
+const fmt = (v, n = 3) => Number.isFinite(v) ? v.toFixed(n).replace('.', ',') : '—';
+
+const MODELOS = [
+  { id: 'tesla.glb', nome: 'Tesla (GLB)', comprimento: 4.7 },
+  { id: 'audi.stl', nome: 'Audi R8 (STL)', comprimento: 4.4 },
+  { id: 'ferrari_f75.glb', nome: 'Ferrari F75 (GLB)', comprimento: 4.7 },
+  { id: 'RB16B_FIXED!.stl', nome: 'Red Bull RB16B (STL)', comprimento: 5.5 },
+  { id: 'DeLorean.STL', nome: 'DeLorean (STL)', comprimento: 4.2 },
+  { id: 'cube_example.stl', nome: 'Cubo (referência)', comprimento: 2.0 },
+];
+
+const app = {
+  rodando: true, solver: null, renderer: null, device: null,
+  malha: null, corpo: null, areaFrontal: 0, units: null, preset: null,
+  janCd: new JanelaCd(900), janCl: new JanelaCd(900),
+  quadros: 0, ultimoFps: performance.now(), fps: 0, subpassos: 1,
+};
+
+/* ─────────────────────────────────────────────────────────── inicialização */
+
+const caps = await sondar();
+const selBackend = $('backend');
+for (const b of caps.backends) {
+  const o = document.createElement('option');
+  o.value = b.id;
+  if (b.disponivel) {
+    /* O caminho WebGL2 tem detecção e emissor prontos e runtime ainda não.
+     * Anunciá-lo como se rodasse seria pior que não anunciá-lo. */
+    const pronto = b.id === 'webgpu';
+    o.textContent = b.nome + (pronto ? '' : ' — runtime pendente');
+    o.disabled = !pronto;
+  } else {
+    o.textContent = `${b.id} — indisponível`;
+    o.disabled = true;
+    o.title = b.motivo;
+  }
+  selBackend.appendChild(o);
+}
+
+const gpu = caps.backends.find(b => b.id === 'webgpu');
+if (!gpu?.disponivel) {
+  $('carregando').innerHTML =
+    `<div style="max-width:44ch;text-align:center;line-height:1.7">` +
+    `<b style="color:var(--erro)">WebGPU indisponível nesta máquina.</b><br><br>` +
+    `<span style="color:var(--tenue)">${gpu?.motivo ?? ''}</span><br><br>` +
+    `O caminho WebGL2, que roda em praticamente qualquer GPU desta década, ` +
+    `está detectado e com o emissor de shaders pronto — falta o runtime.</div>`;
+  throw new Error('sem webgpu');
+}
+selBackend.value = 'webgpu';
+$('vBackend').textContent = `${gpu.vendor} ${gpu.arquitetura}`.trim();
+
+app.device = await SolverWebGPU.criarDevice(gpu.adapter);
+app.renderer = new Renderer(app.device, $('tela'));
+
+const cabem = presetsPara(gpu);
+const selPreset = $('preset');
+for (const p of cabem) {
+  const o = document.createElement('option');
+  o.value = p.id;
+  o.textContent = `${p.nome} — ${p.nx}×${p.ny}×${p.nz} · corpo ${p.celulasNoCorpo} céls`;
+  o.disabled = !p.cabe;
+  if (!p.cabe) o.title = p.motivo;
+  selPreset.appendChild(o);
+}
+selPreset.value = (presetInicial(gpu) ?? cabem[0]).id;
+
+const selModelo = $('modelo');
+for (const m of MODELOS) {
+  const o = document.createElement('option');
+  o.value = m.id; o.textContent = m.nome;
+  selModelo.appendChild(o);
+}
+
+/* ────────────────────────────────────────────────────────────── montagem */
+
+async function carregarModelo(fonte, nome) {
+  $('carregando').style.display = 'grid';
+  $('carregando').textContent = `lendo ${nome}…`;
+  await new Promise(r => setTimeout(r, 20));
+
+  const buf = fonte instanceof ArrayBuffer
+    ? fonte
+    : await (await fetch('examples/' + encodeURIComponent(fonte))).arrayBuffer();
+  app.malha = ler(buf, nome);
+  await montar();
+}
+
+/*
+ * Remontar destrói o solver e cria outro. O laço de desenho roda em
+ * requestAnimationFrame e não sabe disso: entre o `destruir()` e o
+ * `preparar()` do renderizador, ele desenha lendo buffers já liberados.
+ *
+ * O sintoma foi uma tela preta que não voltava — a validação do WebGPU rejeita
+ * o bind group, o passe inteiro é descartado em silêncio, e como o erro é
+ * assíncrono nada aparece no console. Este mutex é a correção, e ele tem de
+ * cobrir da destruição até o renderizador estar religado.
+ */
+let montando = false;
+
+async function montar() {
+  if (montando) return;
+  montando = true;
+  try { await _montar(); } finally { montando = false; }
+}
+
+async function _montar() {
+  const preset = PRESETS.find(p => p.id === selPreset.value);
+  app.preset = preset;
+  const grade = { nx: preset.nx, ny: preset.ny, nz: preset.nz };
+  $('vPreset').textContent = `${(preset.cells / 1e6).toFixed(2)}M céls`;
+
+  $('carregando').style.display = 'grid';
+  $('carregando').textContent = 'voxelizando…';
+  await new Promise(r => setTimeout(r, 20));
+
+  const prep = preparar(app.malha, grade, {
+    celulasPorComprimento: preset.celulasNoCorpo,
+    guinadaGraus: +$('guinada').value,
+  });
+  const vox = voxelizar(prep.positions, prep.indices, grade);
+  app.corpo = vox.tipo;
+  app.areaFrontal = areaFrontalCorpo(vox.tipo, grade);
+  app.prep = prep;
+
+  $('carregando').textContent =
+    `alocando o lattice (${(preset.bytes / 1e9).toFixed(2)} GB)…`;
+  await new Promise(r => setTimeout(r, 20));
+
+  /* Solta a referência ANTES de destruir: o laço testa `app.solver` e não
+   * pode alcançar um objeto cujos buffers já foram para o lixo. */
+  const antigo = app.solver;
+  app.solver = null;
+  antigo?.destruir();
+  app.solver = await SolverWebGPU.criar(app.device, grade);
+
+  const { tipo, esponja } = montarTipos({
+    grade, corpo: vox.tipo, esteira: $('esteira').checked,
+  });
+  app.solver.definirTipos(tipo);
+  app.esponja = esponja;
+
+  await app.renderer.preparar(app.solver, {
+    /* Menos partículas em lattices grandes: o custo de desenhar não muda, mas
+     * num domínio maior a mesma contagem fica esparsa demais para ler. */
+    nParticulas: preset.cells > 8e6 ? 220000 : 150000,
+  });
+  app.renderer.definirMalha(prep.positions, prep.indices);
+
+  aplicarEscoamento();
+
+  /* Calibra a forca de repouso ANTES de inicializar: so com os buffers ainda
+     zerados a medicao isola o termo geometrico. Ver calibrarRepouso(). */
+  await app.solver.calibrarRepouso();
+
+  /* Liga o vento aos poucos. Ver rampa() no solver: ligar de uma vez cria um
+     pulso de pressao que a viscosidade quase nula de omega = 1,98 nao amortece,
+     e o dominio inteiro vira NaN antes de mil passos. */
+  app.solver.rampa(Math.round(preset.nx / 0.05), (f) => aplicarEscoamento(f));
+
+  app.solver.inicializar();
+  app.janCd.limpar(); app.janCl.limpar();
+
+  $('area').textContent = `${app.areaFrontal} céls²`;
+  const bloq = app.areaFrontal / (grade.ny * grade.nz);
+  $('bloqueio').textContent = `${(bloq * 100).toFixed(2)}%`;
+  $('bloqueio').className = bloq > 0.10 ? 'ruim' : (bloq > 0.05 ? 'aviso' : '');
+  $('carregando').style.display = 'none';
+}
+
+function aplicarEscoamento(fator = null) {
+  if (!app.solver) return;
+  const preset = app.preset;
+  const f = fator ?? app.solver.fatorRampa;
+  const U = +$('velocidade').value;
+  const L = +$('comprimento').value;
+  const esteira = $('esteira').checked;
+
+  app.units = new Units({
+    lengthM: L, speedMs: U, cellsPerLength: preset.celulasNoCorpo,
+    rollingRoad: esteira, lesCs: $('les').checked ? 0.1 : 0,
+  });
+  const u = app.units;
+  app.solver.configurar({
+    omegaPlus: u.omegaPlus, lesCs: u.lesCs,
+    inletU: [u.uLb * f, 0, 0],
+    beltU: esteira ? [u.uLb * f, 0, 0] : [0, 0, 0],
+    esponja: app.esponja,
+    espessuraCL: esteira ? 0 : Math.round(preset.nz * 0.12),
+  });
+
+  const v = $('veredito');
+  v.textContent = u.verdict;
+  v.className = u.resolved ? 'bom' : (u.lesCs > 0 ? '' : 'ruim');
+  $('vVel').textContent = `${U} m/s · ${(U * 3.6).toFixed(0)} km/h`;
+  $('vComp').textContent = `${L.toFixed(1)} m`;
+}
+
+/* ──────────────────────────────────────────────────────────────── o laço */
+
+let medindo = false;
+async function medir() {
+  if (medindo || !app.solver || !app.units) return;
+  medindo = true;
+  try {
+    const f = await app.solver.medirForcas();
+    const g = { nx: app.solver.nx, ny: app.solver.ny, nz: app.solver.nz };
+    const co = coeficientes(f, app.units, app.areaFrontal, g);
+    /* Nada do que acontece durante a rampa e regime: descartado. */
+    if (Number.isFinite(co.cd) && app.solver.fatorRampa >= 1) {
+      app.janCd.adicionar(co.cd);
+      app.janCl.adicionar(co.cl);
+      app.ultimoCo = co;
+    }
+  } finally { medindo = false; }
+}
+
+function atualizarPainel() {
+  const cd = app.janCd.media, sd = app.janCd.desvio;
+  $('cd').textContent = fmt(cd);
+  $('cl').textContent = fmt(app.janCl.media);
+  /*
+   * O desvio-padrão fica ao lado da média porque um Cd instantâneo de corpo
+   * rombudo não é uma medida: a esteira desprende vórtices e o valor oscila.
+   * "0,31" e "0,31 ± 0,02" dizem coisas diferentes, e só a segunda é honesta.
+   */
+  $('cdErro').textContent = app.janCd.n < 30
+    ? `acumulando amostras (${app.janCd.n})…`
+    : `± ${fmt(sd)} sobre ${app.janCd.n} amostras` +
+      (app.janCd.madura ? '' : ' · janela ainda enchendo');
+  if (app.ultimoCo && Number.isFinite(cd)) {
+    const q = app.units.dynamicPressure;
+    const A = app.areaFrontal * app.units.dx * app.units.dx;
+    $('arrasto').textContent = `${(cd * q * A).toFixed(1)} N`;
+  }
+}
+
+function laco() {
+  requestAnimationFrame(laco);
+  if (!app.solver || montando) return;
+
+  if (app.rodando) app.solver.passo(app.subpassos);
+  app.renderer.desenhar({ uRef: app.units?.uLb ?? 0.05 });
+
+  app.quadros++;
+  const agora = performance.now();
+  if (agora - app.ultimoFps > 500) {
+    app.fps = app.quadros * 1000 / (agora - app.ultimoFps);
+    app.quadros = 0; app.ultimoFps = agora;
+    if (app.rodando) medir();
+    atualizarPainel();
+
+    const u = app.units;
+    const tFis = u ? app.solver.passos * u.dt : 0;
+    /* Travessia do DOMINIO: nx/u_lb. stepsForFlowthrough usa o comprimento do
+   CORPO, que e uma referencia diferente e vinte vezes menor — rotular uma
+   como a outra faz o painel anunciar convergencia que nao houve. */
+  const trav = u ? Math.ceil(app.preset.nx / u.uLb) : 1;
+    $('hud').innerHTML =
+      `<b>${app.fps.toFixed(0)}</b> fps · <b>${app.subpassos}</b> passo(s)/quadro<br>` +
+      `passo <b>${app.solver.passos.toLocaleString('pt-BR')}</b> · ` +
+      `<b>${(tFis * 1000).toFixed(1)}</b> ms de tempo físico<br>` +
+      (app.solver.fatorRampa < 1
+        ? `acelerando o túnel: <b>${(app.solver.fatorRampa * 100).toFixed(0)}%</b><br>` : '') +
+      `travessias do domínio: <b>${(app.solver.passos / trav).toFixed(2)}</b>` +
+      (app.solver.passos / trav < 3
+        ? ` <span style="color:var(--alerta)">— abaixo de 3, o Cd ainda é transiente</span>` : '');
+    $('estado').textContent = app.rodando
+      ? 'arraste para girar · roda do mouse para aproximar'
+      : 'PAUSADO';
+  }
+}
+
+/* ────────────────────────────────────────────────────────────── controles */
+
+$('rodar').onclick = () => {
+  app.rodando = !app.rodando;
+  $('rodar').textContent = app.rodando ? '⏸ pausar' : '▶ retomar';
+};
+$('reiniciar').onclick = () => {
+  app.solver?.inicializar();
+  app.janCd.limpar(); app.janCl.limpar();
+};
+selPreset.onchange = () => montar();
+selModelo.onchange = () => {
+  const m = MODELOS.find(x => x.id === selModelo.value);
+  $('comprimento').value = m.comprimento;
+  carregarModelo(m.id, m.id);
+};
+$('arquivo').onchange = async (e) => {
+  const f = e.target.files?.[0];
+  if (f) await carregarModelo(await f.arrayBuffer(), f.name);
+};
+$('guinada').oninput = (e) => { $('vGuinada').textContent = `${e.target.value}°`; };
+$('guinada').onchange = () => montar();
+$('esteira').onchange = () => montar();
+for (const id of ['velocidade', 'comprimento', 'les']) {
+  $(id).oninput = () => { aplicarEscoamento(); app.janCd.limpar(); app.janCl.limpar(); };
+}
+$('oEsteiras').onchange = e => { app.renderer.opcoes.esteiras = e.target.checked; };
+$('oCorpo').onchange = e => { app.renderer.opcoes.corpo = e.target.checked; };
+$('oCp').onchange = e => { app.renderer.opcoes.cp = e.target.checked; };
+$('ganho').oninput = e => {
+  app.renderer.opcoes.ganhoCp = +e.target.value;
+  $('vGanho').textContent = (+e.target.value).toFixed(1).replace('.', ',') + '×';
+};
+
+/*
+ * Quantos passos de lattice cabem num quadro. Calibrado uma vez na montagem a
+ * partir do custo medido: mais passos por quadro adiantam o escoamento mais
+ * rápido, mas passar de ~16 ms por quadro derruba a interatividade e a
+ * simulação parece travada mesmo avançando depressa.
+ */
+function calibrarSubpassos() {
+  const c = app.preset?.cells ?? 3e6;
+  app.subpassos = Math.max(1, Math.min(12, Math.round(2.2e7 / c)));
+}
+selPreset.addEventListener('change', calibrarSubpassos);
+
+window.__app = app;   /* gancho de depuracao */
+await carregarModelo(MODELOS[0].id, MODELOS[0].id);
+calibrarSubpassos();
+laco();
+</script>
+</html>

@@ -187,7 +187,13 @@ for (let z = 18; z < 30; z++) for (let y = 18; y < 30; y++) for (let x = 30; x <
   tipos[(z * s3.ny + y) * s3.nx + x] = TIPO.SOLIDO; nSolido++;
 }
 s3.definirTipos(tipos);
-s3.configurar({ omegaPlus: 1.2, lesCs: 0.0, inletU: [0.05, 0, 0] });
+s3.configurar({ omegaPlus: 1.2, lesCs: 0.0, inletU: [0.05, 0, 0],
+  /* Esponja desligada: ela mistura o estado com o equilibrio da corrente livre,
+     o que e um sumidouro de massa DE PROPOSITO — e absorver a esteira e
+     exatamente o que se quer dela. Com ela ligada, "massa conservada" deixaria
+     de ser o invariante certo a testar. Aqui o dominio e periodico com um
+     obstaculo e nada mais, e nesse caso a massa tem de fechar. */
+  esponja: { inicio: 1e9, comprimento: 1 } });
 s3.inicializar();
 
 s3.atualizarMacros();

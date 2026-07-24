@@ -24,12 +24,14 @@
  * problemas está causando o erro.)
  */
 
-import { Q } from '../../core/lattice.js';
-import { shaderPasso, shaderInit, shaderMacros, planoDeBuffers, TIPO } from '../../core/emit/wgsl.js';
-import { MAGIC } from '../../core/lattice.js';
+import { Q, MAGIC } from '../../core/lattice.js';
+import {
+  shaderPasso, shaderInit, shaderMacros, shaderForcas, shaderReduzir,
+  planoDeBuffers, TIPO,
+} from '../../core/emit/wgsl.js';
 
-/* Params: vec4<u32> + 4 f32 + vec4<f32> + vec4<f32> = 16 + 16 + 16 + 16 */
-const PARAMS_BYTES = 64;
+/* dim + (omega,magic,les,_) + belt + inlet + sponge = 5 x 16 bytes */
+const PARAMS_BYTES = 80;
 
 export class SolverWebGPU {
   constructor(device, { nx, ny, nz, nbuf, limites }) {
@@ -150,6 +152,16 @@ export class SolverWebGPU {
     this.params = criar(PARAMS_BYTES,
       GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, 'params');
 
+    /* Um vec4 por workgroup do kernel de forças. */
+    this.nWorkgroups = Math.ceil(this.nx / 64) * this.ny * this.nz;
+    this.parciais = criar(this.nWorkgroups * 16, ST, 'parciais');
+    this.totalForca = criar(16, ST | GPUBufferUsage.COPY_SRC, 'totalForca');
+    this.nPart = criar(16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, 'nPart');
+    device.queue.writeBuffer(this.nPart, 0,
+      new Uint32Array([this.nWorkgroups, 0, 0, 0]));
+    this.leituraForca = criar(16,
+      GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ, 'leituraForca');
+
     /* Um erro de alocação em WebGPU chega de forma assíncrona no device; sem
      * este dreno ele viraria um `undefined` sem explicação lá na frente. */
     device.pushErrorScope('out-of-memory');
@@ -178,6 +190,9 @@ export class SolverWebGPU {
     }
     entradas.push({ binding: b++, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } });
     entradas.push({ binding: b++, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } });
+    /* o kernel de forças acrescenta as parciais no fim do mesmo layout, para
+     * os quatro kernels compartilharem um bind group só */
+    entradas.push({ binding: b++, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } });
 
     this.layout = device.createBindGroupLayout({ entries: entradas, label: 'lbm' });
     const pl = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
@@ -186,10 +201,12 @@ export class SolverWebGPU {
       passo: shaderPasso({ nbuf, escreverMacros: true }),
       init: shaderInit({ nbuf }),
       macros: shaderMacros({ nbuf }),
+      forcas: shaderForcas({ nbuf }),
+      reduzir: shaderReduzir(),
     };
     this.fontes = fontes;
 
-    const pipe = async (nome, codigo) => {
+    const pipe = async (nome, codigo, layoutPipeline) => {
       device.pushErrorScope('validation');
       const mod = device.createShaderModule({ code: codigo, label: nome });
       const info = await mod.getCompilationInfo();
@@ -200,13 +217,15 @@ export class SolverWebGPU {
         throw new Error(`shader "${nome}" não compilou:\n${det || err?.message}`);
       }
       return device.createComputePipeline({
-        layout: pl, compute: { module: mod, entryPoint: 'main' }, label: nome,
+        layout: layoutPipeline, compute: { module: mod, entryPoint: 'main' },
+        label: nome,
       });
     };
 
-    this.pipePasso = await pipe('passo', fontes.passo);
-    this.pipeInit = await pipe('init', fontes.init);
-    this.pipeMacros = await pipe('macros', fontes.macros);
+    this.pipePasso = await pipe('passo', fontes.passo, pl);
+    this.pipeInit = await pipe('init', fontes.init, pl);
+    this.pipeMacros = await pipe('macros', fontes.macros, pl);
+    this.pipeForcas = await pipe('forcas', fontes.forcas, pl);
 
     /* Dois bind groups: A->B e B->A. Trocar é trocar de grupo, não recriar. */
     const grupo = (src, dst) => device.createBindGroup({
@@ -217,12 +236,32 @@ export class SolverWebGPU {
         ...dst.map((buf, i) => ({ binding: 1 + nbuf + i, resource: { buffer: buf } })),
         { binding: 1 + 2 * nbuf, resource: { buffer: this.tipo } },
         { binding: 2 + 2 * nbuf, resource: { buffer: this.macros } },
+        { binding: 3 + 2 * nbuf, resource: { buffer: this.parciais } },
       ],
     });
 
     this.grupoAB = grupo(this.popA, this.popB);
     this.grupoBA = grupo(this.popB, this.popA);
     this.frente = 'A';   // onde está o estado atual
+
+    /* A redução tem layout próprio: ela não toca em populações. */
+    this.layoutRed = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      ],
+    });
+    const plRed = device.createPipelineLayout({ bindGroupLayouts: [this.layoutRed] });
+    this.pipeReduzir = await pipe('reduzir', fontes.reduzir, plRed);
+    this.grupoRed = device.createBindGroup({
+      layout: this.layoutRed,
+      entries: [
+        { binding: 0, resource: { buffer: this.nPart } },
+        { binding: 1, resource: { buffer: this.parciais } },
+        { binding: 2, resource: { buffer: this.totalForca } },
+      ],
+    });
   }
 
   /* ─────────────────────────────────────────────────────────── configuração */
@@ -235,14 +274,22 @@ export class SolverWebGPU {
    * @param {number[]} o.inletU   corrente livre em unidades de lattice
    * @param {number[]} [o.beltU]  velocidade da esteira
    */
-  configurar({ omegaPlus, magic = MAGIC.WALL, lesCs = 0.1, inletU, beltU = [0, 0, 0] }) {
+  configurar({
+    omegaPlus, magic = MAGIC.WALL, lesCs = 0.1, inletU,
+    beltU = [0, 0, 0], esponja = null, espessuraCL = 0,
+  }) {
+    const esp = esponja ?? {
+      inicio: Math.round(this.nx * 0.82),
+      comprimento: Math.max(4, Math.round(this.nx * 0.18)),
+    };
     const buf = new ArrayBuffer(PARAMS_BYTES);
     new Uint32Array(buf, 0, 4).set([this.nx, this.ny, this.nz, 0]);
     new Float32Array(buf, 16, 4).set([omegaPlus, magic, lesCs, 0]);
     new Float32Array(buf, 32, 4).set([beltU[0], beltU[1], beltU[2], 0]);
     new Float32Array(buf, 48, 4).set([inletU[0], inletU[1], inletU[2], 0]);
+    new Float32Array(buf, 64, 4).set([esp.inicio, esp.comprimento, espessuraCL, 0]);
     this.device.queue.writeBuffer(this.params, 0, buf);
-    this.cfg = { omegaPlus, magic, lesCs, inletU, beltU };
+    this.cfg = { omegaPlus, magic, lesCs, inletU, beltU, esponja: esp, espessuraCL };
   }
 
   /** Carrega o campo de tipos de célula (Uint32Array de N elementos). */
@@ -352,6 +399,39 @@ export class SolverWebGPU {
     return saida;
   }
 
+  /**
+   * Força sobre o corpo, em unidades de lattice, por troca de momento.
+   *
+   * Dois despachos e uma leitura de 16 bytes. A leitura sincroniza com a GPU,
+   * então não se mede força todo passo: o coeficiente é uma média sobre
+   * centenas de passos de qualquer forma, e amostrar a cada 20 ou 50 passos
+   * custa nada e não engasga o pipeline.
+   *
+   * @returns {Promise<number[]>} [fx, fy, fz]
+   */
+  async medirForcas() {
+    const enc = this.device.createCommandEncoder();
+    const p = enc.beginComputePass();
+
+    p.setPipeline(this.pipeForcas);
+    /* lê o estado atual, que está no lado `src` do grupo da frente */
+    p.setBindGroup(0, this.frente === 'A' ? this.grupoAB : this.grupoBA);
+    p.dispatchWorkgroups(Math.ceil(this.nx / 64), this.ny, this.nz);
+
+    p.setPipeline(this.pipeReduzir);
+    p.setBindGroup(0, this.grupoRed);
+    p.dispatchWorkgroups(1);
+    p.end();
+
+    enc.copyBufferToBuffer(this.totalForca, 0, this.leituraForca, 0, 16);
+    this.device.queue.submit([enc.finish()]);
+
+    await this.leituraForca.mapAsync(GPUMapMode.READ);
+    const v = new Float32Array(this.leituraForca.getMappedRange().slice(0));
+    this.leituraForca.unmap();
+    return [v[0], v[1], v[2]];
+  }
+
   /** Recalcula macros a partir do estado atual sem avançar o tempo. */
   atualizarMacros() {
     const enc = this.device.createCommandEncoder();
@@ -367,7 +447,8 @@ export class SolverWebGPU {
   /** Libera os buffers. NÃO destrói o device — ele é compartilhado. */
   destruir() {
     for (const b of [...this.popA, ...this.popB,
-      this.tipo, this.macros, this.params]) b.destroy();
+      this.tipo, this.macros, this.params, this.parciais,
+      this.totalForca, this.nPart, this.leituraForca]) b.destroy();
   }
 }
 

@@ -1,0 +1,75 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CFD2026 — desempenho do solver</title>
+<style>
+  body { font: 13px/1.6 ui-monospace, Consolas, monospace; background: #0e1014;
+         color: #d6dae2; margin: 0; padding: 24px 28px; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+       color: #7b8496; margin: 0 0 6px; }
+  p.nota { color: #7b8496; max-width: 78ch; margin: 4px 0 16px; }
+  table { border-collapse: collapse; }
+  td, th { padding: 3px 20px 3px 0; text-align: left; }
+  th { color: #5d6473; font-weight: 400; border-bottom: 1px solid #232833; }
+  .num { color: #94c8ff; } .ok { color: #4ec9a0; } .warn { color: #e0af68; }
+</style>
+<h1>CFD2026 — desempenho do solver</h1>
+<p class="nota">MLUPS = milhões de atualizações de célula por segundo. O LBM é limitado por banda de
+memória: cada passo lê 19 floats e escreve 19, ou 152 bytes por célula. O teto teórico da placa é
+(banda) ÷ 152, e a fração dele que alcançamos é o único número que diz se vale otimizar mais.</p>
+<div id="s">medindo…</div>
+<script type="module">
+import { sondar, PRESETS } from '../src/backend/caps.js';
+import { SolverWebGPU } from '../src/backend/webgpu/solver.js';
+
+const s = document.getElementById('s');
+const caps = await sondar();
+const gpu = caps.backends.find(b => b.id === 'webgpu');
+if (!gpu?.disponivel) { s.textContent = 'sem WebGPU'; throw 0; }
+const device = await SolverWebGPU.criarDevice(gpu.adapter);
+
+const linhas = [];
+for (const p of PRESETS.slice(0, 4)) {
+  s.textContent = `medindo ${p.nome} (${p.nx}×${p.ny}×${p.nz})…`;
+  await new Promise(r => setTimeout(r, 30));
+  let solver;
+  try { solver = await SolverWebGPU.criar(device, p); }
+  catch (e) { linhas.push({ p, erro: e.message }); continue; }
+
+  solver.definirTipos(new Uint32Array(solver.N));
+  solver.configurar({ omegaPlus: 1.8, lesCs: 0.1, inletU: [0.05, 0, 0] });
+  solver.inicializar();
+
+  solver.passo(40);                 // aquecimento: compila, aloca, popula caches
+  await solver.lerMacros();
+
+  const N = 200;
+  const t0 = performance.now();
+  solver.passo(N);
+  await solver.lerMacros();         // força a sincronização com a GPU
+  const dt = (performance.now() - t0) / 1000;
+
+  const mlups = solver.N * N / dt / 1e6;
+  const gbs = mlups * 1e6 * 152 / 1e9;
+  linhas.push({ p, mlups, gbs, passosPorSeg: N / dt, dt });
+  solver.destruir();
+}
+
+const alvo60 = (m, cells) => m * 1e6 / cells;   // passos/s
+s.innerHTML = '<table><tr><th>preset</th><th>células</th><th>MLUPS</th>' +
+  '<th>banda efetiva</th><th>passos/s</th><th>a 60 fps</th></tr>' +
+  linhas.map(r => {
+    if (r.erro) return `<tr><td>${r.p.nome}</td><td colspan="5" class="warn">${r.erro}</td></tr>`;
+    const sub = Math.floor(r.passosPorSeg / 60);
+    return `<tr><td>${r.p.nome}</td>` +
+      `<td class="num">${(r.p.cells/1e6).toFixed(2)}M</td>` +
+      `<td class="num">${r.mlups.toFixed(0)}</td>` +
+      `<td class="num">${r.gbs.toFixed(0)} GB/s</td>` +
+      `<td class="num">${r.passosPorSeg.toFixed(0)}</td>` +
+      `<td class="${sub>=1?'ok':'warn'}">${sub} subpasso(s)/quadro</td></tr>`;
+  }).join('') + '</table>' +
+  '<p class="nota">A última coluna é o que decide a interação em tempo real: quantos passos de ' +
+  'lattice cabem num quadro de 60 Hz. Um subpasso por quadro já dá escoamento vivo na tela; ' +
+  'menos que isso e a simulação anda em câmera lenta em relação ao relógio.</p>';
+window.__perf = linhas.map(r => ({ preset: r.p.id, cells: r.p.cells, mlups: r.mlups, gbs: r.gbs,
+  passosPorSeg: r.passosPorSeg, erro: r.erro }));
+</script>

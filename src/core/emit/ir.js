@@ -43,13 +43,42 @@
 
 import { Q, C, W, OPP, CS2, INV_CS2, INV_CS4, MAGIC } from '../lattice.js';
 
-/* Tipos de célula. Cabem num u32; o solver lê um por célula. */
+/*
+ * Tipos de célula. Cabem num u32; o solver lê um por célula.
+ *
+ * ESPELHO_Y e ESPELHO_Z são paredes de DESLIZAMENTO LIVRE, e não paredes de
+ * verdade. As laterais e o teto de um túnel numérico não devem crescer camada
+ * limite: elas não existem no escoamento que estamos modelando (um carro na
+ * estrada não tem paredes a três metros de cada lado), e a camada limite que
+ * elas criariam estreitaria a seção de teste ao longo do domínio, aumentando o
+ * bloqueio progressivamente e inflando o arrasto. Reflexão especular deixa o
+ * ar deslizar: a componente normal inverte, as tangenciais passam.
+ *
+ * O PISO é o oposto — ele existe, e é SOLIDO_MOVEL quando a esteira está
+ * ligada. Essa assimetria entre piso e teto é a geometria real do problema.
+ */
 export const CELULA = {
   FLUIDO: 0,
   SOLIDO: 1,
   ENTRADA: 2,
   SAIDA: 3,
+  SOLIDO_MOVEL: 4,
+  ESPELHO_Y: 5,
+  ESPELHO_Z: 6,
 };
+
+/**
+ * Índice da direção com a componente `eixo` negada e as outras preservadas —
+ * a reflexão especular. Existe porque D3Q19 é fechado sob essa operação.
+ */
+export function espelharIdx(i, eixo) {
+  const c = C[i].slice();
+  c[eixo] = -c[eixo];
+  for (let j = 0; j < Q; j++) {
+    if (C[j][0] === c[0] && C[j][1] === c[1] && C[j][2] === c[2]) return j;
+  }
+  throw new Error(`espelharIdx: sem par para ${i} no eixo ${eixo}`);
+}
 
 /**
  * Formata um float de modo que float64 -> texto -> float32 seja exato, e que
@@ -256,35 +285,162 @@ export function blocoBounceBack(d) {
   return L;
 }
 
+/**
+ * Reflexão especular numa parede de deslizamento livre.
+ *
+ * Idêntico em forma ao bounce-back, trocando `opp` por `espelhar`: o nó de
+ * parede devolve o que chegou, mas só com a componente normal invertida.
+ */
+export function blocoEspelho(d, eixo) {
+  const L = [];
+  L.push(d.comentario(`parede de deslizamento livre: inverte só ${'xyz'[eixo]}`));
+  for (let i = 0; i < Q; i++) {
+    L.push(d.setPop(i, `g${espelharIdx(i, eixo)}`));
+  }
+  return L;
+}
+
+/**
+ * Entrada: equilíbrio na velocidade prescrita.
+ *
+ * A alternativa mais precisa é extrapolação de não-equilíbrio (Guo), que
+ * preserva o tensor de tensões vindo de dentro do domínio e custa ler as
+ * dezenove populações do vizinho. Não vale aqui: a entrada fica a três
+ * comprimentos de corpo do nariz, o escoamento que chega nela é uniforme por
+ * construção, e não há tensão de não-equilíbrio para preservar. Onde o
+ * equilíbrio puro machuca é encostado numa parede que cisalha — e é
+ * exatamente por isso que o piso da entrada acompanha a esteira.
+ *
+ * `uEntrada` já vem com o perfil de camada limite aplicado pelo chamador.
+ */
+export function blocoEntrada(d) {
+  const L = [];
+  L.push(d.comentario('entrada: equilíbrio na velocidade prescrita, rho = 1'));
+  L.push(d.letF32('deltaIn', '0.0'));
+  L.push(d.letF32('rhoIn', '1.0'));
+  L.push(d.letF32('uuIn', 'dot(uEntrada, uEntrada)'));
+  for (let i = 0; i < Q; i++) {
+    if (i === 0) {
+      L.push(d.setPop(0, `${num(W[0])} * (deltaIn - 1.5 * rhoIn * uuIn)`));
+      continue;
+    }
+    const cu = dotC(i, 'uEntrada');
+    L.push(d.letF32(`ci${i}`, cu));
+    L.push(d.setPop(i, `${num(W[i])} * (deltaIn + rhoIn * ` +
+      `(3.0 * ci${i} + 4.5 * ci${i} * ci${i} - 1.5 * uuIn))`));
+  }
+  return L;
+}
+
+/**
+ * Saída: equilíbrio na velocidade local, densidade de referência.
+ *
+ * Sozinha isto refletiria — e a onda refletida sobe o domínio, alcança o corpo
+ * e contamina o arrasto com uma oscilação que parece desprendimento de vórtice
+ * e não é. Quem faz o trabalho de verdade é a camada esponja (ver
+ * blocoEsponja): quando a esteira chega neste plano ela já foi absorvida.
+ */
+export function blocoSaida(d) {
+  const L = [];
+  L.push(d.comentario('saída: gradiente nulo em u, pressão de referência'));
+  for (let i = 0; i < Q; i++) {
+    if (i === 0) {
+      L.push(d.setPop(0, `${num(W[0])} * (-1.5 * uu)`));
+      continue;
+    }
+    L.push(d.setPop(i, `${num(W[i])} * ` +
+      `(3.0 * cu${i} + 4.5 * cu${i} * cu${i} - 1.5 * uu)`));
+  }
+  return L;
+}
+
+/**
+ * Camada esponja: mistura o estado pós-colisão com o equilíbrio da corrente
+ * livre, com peso crescendo até 1 na saída.
+ *
+ * É o absorvedor. Sem ele o domínio é uma caixa com paredes acústicas: cada
+ * vórtice que atinge a saída volta, e o Cd ganha uma oscilação espúria com o
+ * período da travessia do domínio — que é fácil de confundir com Strouhal,
+ * porque tem a mesma cara num gráfico.
+ *
+ * A rampa é quadrática de propósito. Linear introduz um degrau de derivada no
+ * começo da esponja, e um degrau também reflete, só que menos.
+ */
+export function blocoEsponja(d) {
+  const L = [];
+  L.push(d.comentario('esponja: absorve a esteira antes que ela reflita na saída'));
+  L.push(d.letF32('sx', '(f32(gid.x) - uSpongeStart) / max(uSpongeLen, 1.0)'));
+  L.push(d.letF32('sigma', 'clamp(sx, 0.0, 1.0)'));
+  L.push(d.letF32('sig2', 'sigma * sigma'));
+  L.push(d.letF32('uuInf', 'dot(uInf, uInf)'));
+  for (let i = 0; i < Q; i++) {
+    if (i === 0) {
+      L.push(d.letF32('t0', `${num(W[0])} * (-1.5 * uuInf)`));
+      L.push(d.setPop(0, `mix(${d.lerPopDst(0)}, t0, sig2)`));
+      continue;
+    }
+    const cu = dotC(i, 'uInf');
+    L.push(d.letF32(`si${i}`, cu));
+    L.push(d.letF32(`t${i}`, `${num(W[i])} * ` +
+      `(3.0 * si${i} + 4.5 * si${i} * si${i} - 1.5 * uuInf)`));
+    L.push(d.setPop(i, `mix(${d.lerPopDst(i)}, t${i}, sig2)`));
+  }
+  return L;
+}
+
 /* ──────────────────────────────────────────────────────────── passo inteiro */
 
 /**
  * Corpo completo do kernel de passo, em linhas.
  *
- * O dialeto fornece: comentario, letF32, letVec3, vec3, lerPop, setPop,
- * vizinho, seSolido/senao/fim. Nada mais deste arquivo conhece a linguagem
- * alvo.
+ * O dialeto fornece: comentario, letF32, letVec3, vec3, lerPop, lerPopDst,
+ * setPop, vizinho, se/senaoSe/senao/fimSe e indentar. Nada mais deste arquivo
+ * conhece a linguagem alvo.
+ *
+ * A ordem dos ramos importa para o desempenho, não para a correção: o caso
+ * FLUIDO é a esmagadora maioria das células e fica por último como `else`,
+ * onde não paga nenhum teste.
  */
-export function emitirPasso(d) {
+export function emitirPasso(d, { comEsponja = true } = {}) {
   const L = [];
   L.push(...blocoPull(d));
   L.push('');
   L.push(...blocoMomentos(d));
   L.push('');
 
-  L.push(...d.seSolido());
-  L.push(...blocoBounceBack(d).map(s => d.indentar(s)));
+  const ramo = (cond, corpo) => {
+    L.push(...(L._aberto ? d.senaoSe(cond) : d.se(cond)));
+    L._aberto = true;
+    L.push(...corpo.map(s => d.indentar(s)));
+  };
+
+  ramo(d.ehTipo('SOLIDO') + ' || ' + d.ehTipo('SOLIDO_MOVEL'), blocoBounceBack(d));
+  ramo(d.ehTipo('ESPELHO_Y'), blocoEspelho(d, 1));
+  ramo(d.ehTipo('ESPELHO_Z'), blocoEspelho(d, 2));
+  ramo(d.ehTipo('ENTRADA'), blocoEntrada(d));
+
+  /* SAIDA usa cu{i} e uu, que blocoEquilibrio ainda não declarou neste ramo;
+   * por isso ela reaproveita os momentos e emite os c.u que precisa. */
+  const saida = [];
+  for (let i = 1; i < Q; i++) saida.push(d.letF32(`cu${i}`, dotC(i, 'u')));
+  saida.push(...blocoSaida(d));
+  ramo(d.ehTipo('SAIDA'), saida);
+
+  const fluido = [];
+  fluido.push(...blocoEquilibrio(d));
+  fluido.push('');
+  fluido.push(...blocoLES(d));
+  fluido.push('');
+  fluido.push(...blocoColisao(d));
+  if (comEsponja) {
+    fluido.push('');
+    fluido.push(...blocoEsponja(d));
+  }
   L.push(...d.senao());
-
-  const corpo = [];
-  corpo.push(...blocoEquilibrio(d));
-  corpo.push('');
-  corpo.push(...blocoLES(d));
-  corpo.push('');
-  corpo.push(...blocoColisao(d));
-  L.push(...corpo.map(s => d.indentar(s)));
-
+  L.push(...fluido.map(s => d.indentar(s)));
   L.push(...d.fimSe());
+
+  delete L._aberto;
   return L;
 }
 

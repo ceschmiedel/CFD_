@@ -38,12 +38,7 @@ import {
   emitirPasso, blocoEquilibrio,
 } from './ir.js';
 
-/* Tipos de célula que o shader distingue. SOLIDO_MOVEL existe separado para a
- * esteira rolante e as rodas: mesma reflexão, mais o termo de parede móvel. */
-export const TIPO = {
-  ...CELULA,
-  SOLIDO_MOVEL: 4,
-};
+export const TIPO = { ...CELULA };
 
 /** Como as Q direções se distribuem entre `nbuf` buffers. */
 export function planoDeBuffers(nbuf) {
@@ -79,14 +74,33 @@ function dialeto(plano, prefSrc = 'src', prefDst = 'dst') {
     indentar: (s) => (s ? '  ' + s : s),
 
     lerPop: (i, idx) => end(prefSrc, i, idx),
+    lerPopDst: (i) => end(prefDst, i, 'cell'),
     setPop: (i, e) => `${end(prefDst, i, 'cell')} = ${e};`,
 
-    vizinho: (dx, dy, dz) =>
-      (dx === 0 && dy === 0 && dz === 0)
-        ? 'cell'
-        : `viz(pos, vec3<i32>(${dx}, ${dy}, ${dz}))`,
+    /*
+     * Índice do vizinho, montado a partir de coordenadas JÁ envolvidas.
+     *
+     * A versão anterior chamava uma função `viz(pos, d)` que fazia
+     * `(p + d + n) % n`. Correto e devastador: são três módulos inteiros por
+     * direção, dezenove direções, cinquenta e sete divisões inteiras por
+     * thread. Divisão inteira custa dezenas de ciclos numa GPU, e num kernel
+     * que deveria estar limitado por banda de memória ela passou a ser o
+     * gargalo — o solver rodava a uma fração da banda disponível.
+     *
+     * Como |c_i| <= 1, o envolvimento tem só três casos por eixo, e os três
+     * são calculados uma vez no cabeçalho (xm, x0, xp e análogos). Cada
+     * direção vira aritmética de índice pura. Seis `select` no total,
+     * nenhuma divisão.
+     */
+    vizinho: (dx, dy, dz) => {
+      if (dx === 0 && dy === 0 && dz === 0) return 'cell';
+      const eixo = (d, n) => (d < 0 ? `${n}m` : d > 0 ? `${n}p` : `${n}0`);
+      return `(${eixo(dz, 'z')} * nxny + ${eixo(dy, 'y')} * P.dim.x + ${eixo(dx, 'x')})`;
+    },
 
-    seSolido: () => ['if (solido) {'],
+    ehTipo: (nome) => `ct == ${CELULA[nome]}u`,
+    se: (cond) => [`if (${cond}) {`],
+    senaoSe: (cond) => [`} else if (${cond}) {`],
     senao: () => ['} else {'],
     fimSe: () => ['}'],
   };
@@ -104,6 +118,7 @@ function declaracoes(nbuf, comMacros) {
   L.push('  _pad: f32,');
   L.push('  beltU: vec4<f32>,      // velocidade tangencial do piso (esteira)');
   L.push('  inletU: vec4<f32>,     // corrente livre, unidades de lattice');
+  L.push('  sponge: vec4<f32>,     // início, comprimento, espessura da CL da entrada, _');
   L.push('};');
   L.push('');
   L.push('@group(0) @binding(0) var<uniform> P: Params;');
@@ -120,14 +135,24 @@ function declaracoes(nbuf, comMacros) {
     L.push(`@group(0) @binding(${b++}) var<storage, read_write> macros: array<vec4<f32>>;`);
   }
 
-  L.push('');
-  L.push('// índice linear do vizinho, com envolvimento periódico.');
-  L.push('// |c_i| <= 1 em toda direção, então somar n antes do módulo basta.');
-  L.push('fn viz(p: vec3<i32>, d: vec3<i32>) -> u32 {');
-  L.push('  let n = vec3<i32>(i32(P.dim.x), i32(P.dim.y), i32(P.dim.z));');
-  L.push('  let q = (p + d + n) % n;');
-  L.push('  return u32(q.z) * P.dim.x * P.dim.y + u32(q.y) * P.dim.x + u32(q.x);');
-  L.push('}');
+  return L;
+}
+
+/**
+ * Coordenadas envolvidas dos três vizinhos possíveis em cada eixo.
+ *
+ * Emitidas uma vez por invocação e reaproveitadas pelas dezenove direções.
+ * Ver o comentário em `vizinho` no dialeto para por que isto não é um módulo.
+ */
+function envolvimento() {
+  const L = [];
+  L.push('  let nxny = P.dim.x * P.dim.y;');
+  L.push('  // vizinhos envolvidos por eixo: menos um, o próprio, mais um');
+  for (const [n, dim] of [['x', 'P.dim.x'], ['y', 'P.dim.y'], ['z', 'P.dim.z']]) {
+    L.push(`  let ${n}0 = gid.${n};`);
+    L.push(`  let ${n}m = select(gid.${n} - 1u, ${dim} - 1u, gid.${n} == 0u);`);
+    L.push(`  let ${n}p = select(gid.${n} + 1u, 0u, gid.${n} == ${dim} - 1u);`);
+  }
   return L;
 }
 
@@ -137,18 +162,29 @@ function cabecalhoKernel(comMacros) {
   L.push('fn main(@builtin(global_invocation_id) gid: vec3<u32>) {');
   L.push('  if (gid.x >= P.dim.x || gid.y >= P.dim.y || gid.z >= P.dim.z) { return; }');
   L.push('');
-  L.push('  let pos = vec3<i32>(i32(gid.x), i32(gid.y), i32(gid.z));');
   L.push('  let N = P.dim.x * P.dim.y * P.dim.z;');
-  L.push('  let cell = gid.z * P.dim.x * P.dim.y + gid.y * P.dim.x + gid.x;');
+  L.push(...envolvimento());
+  L.push('  let cell = z0 * nxny + y0 * P.dim.x + x0;');
   L.push('');
   L.push('  let ct = tipo[cell];');
-  L.push(`  let solido = (ct == ${TIPO.SOLIDO}u) || (ct == ${TIPO.SOLIDO_MOVEL}u);`);
   L.push('  // só a parede marcada como móvel arrasta o fluido junto');
   L.push(`  let uWall = select(vec3<f32>(0.0), P.beltU.xyz, ct == ${TIPO.SOLIDO_MOVEL}u);`);
   L.push('');
   L.push('  let uOmegaPlus = P.omegaPlus;');
   L.push('  let uMagic = P.magic;');
   L.push('  let uLesCs = P.lesCs;');
+  L.push('  let uSpongeStart = P.sponge.x;');
+  L.push('  let uSpongeLen = P.sponge.y;');
+  L.push('  let uInf = P.inletU.xyz;');
+  L.push('');
+  L.push('  // Perfil de camada limite na entrada, lei de potência 1/7.');
+  L.push('  // Com esteira rolante uInletBL é 0 e isto vira escoamento uniforme,');
+  L.push('  // que é solução EXATA do lattice — a única condição em que');
+  L.push('  // omega = 1.98 é estável (ver units.js).');
+  L.push('  let uInletBL = max(P.sponge.z, 1.0);');
+  L.push('  let zc = f32(gid.z) + 0.5;');
+  L.push('  let blf = select(1.0, pow(zc / uInletBL, 0.1428571429), zc < P.sponge.z);');
+  L.push('  let uEntrada = P.inletU.xyz * blf;');
   return L;
 }
 
@@ -205,8 +241,14 @@ export function shaderInit({ nbuf = 1 } = {}) {
   L.push('  let cell = gid.z * P.dim.x * P.dim.y + gid.y * P.dim.x + gid.x;');
   L.push('');
   L.push('  let ct = tipo[cell];');
-  L.push(`  let parado = (ct == ${TIPO.SOLIDO}u) || (ct == ${TIPO.SOLIDO_MOVEL}u);`);
-  L.push('  let u = select(P.inletU.xyz, vec3<f32>(0.0), parado);');
+  L.push(`  let parado = (ct == ${TIPO.SOLIDO}u);`);
+  L.push('  // O piso da esteira parte com a velocidade da esteira, não parado:');
+  L.push('  // partir com ele parado cria um degrau de cisalhamento no primeiro');
+  L.push('  // passo, exatamente onde o bounce-back é menos estável.');
+  L.push(`  let esteira = (ct == ${TIPO.SOLIDO_MOVEL}u);`);
+  L.push('  var u = P.inletU.xyz;');
+  L.push('  if (parado) { u = vec3<f32>(0.0); }');
+  L.push('  if (esteira) { u = P.beltU.xyz; }');
   L.push('  let delta = 0.0;');
   L.push('  let rho = 1.0;');
   L.push('  let uu = dot(u, u);');
@@ -214,6 +256,134 @@ export function shaderInit({ nbuf = 1 } = {}) {
   L.push(...blocoEquilibrio(d).map(s => '  ' + s));
   L.push('');
   for (let i = 0; i < Q; i++) L.push('  ' + d.setPop(i, `e${i}`));
+  L.push('}');
+  return L.join('\n');
+}
+
+/**
+ * Kernel de forças por TROCA DE MOMENTO.
+ *
+ * Para cada link que cruza a superfície — nó de fluido x_f com vizinho sólido
+ * x_s = x_f + c_i — a quantidade de movimento entregue à parede é
+ *
+ *     dF = c_i [ f_i(x_f) + f_ī(x_s) ]
+ *
+ * A população parte com momento c_i f_i e volta com c_ī f_ī = -c_i f_ī; a
+ * diferença ficou com o corpo. Somando sobre todos os links sai a força total.
+ *
+ * ISTO INCLUI O ATRITO VISCOSO. É a razão de o método ser este e não uma
+ * integração de pressão sobre a superfície: a integração de pressão precisa de
+ * normais reconstruídas a partir de voxels — que numa escada de voxels são
+ * ruído — e ignora o cisalhamento, que responde por 10 a 25% do arrasto de um
+ * carro. A troca de momento não usa normal nenhuma e entrega as duas parcelas
+ * juntas, porque elas são a mesma coisa vista do lattice.
+ *
+ * O DETALHE QUE SE ERRA: com populações deslocadas, f = g + w, e
+ *
+ *     c_i [ (g_i + w_i) + (g_ī + w_ī) ] = c_i [ g_i + g_ī + 2 w_i ]
+ *
+ * O termo 2 w_i c_i NÃO cancela. Ele só cancelaria somado sobre o par oposto
+ * inteiro, e um link é um só — o link oposto atravessa a superfície do outro
+ * lado do corpo e é uma contribuição legítima e diferente. Esquecer o termo dá
+ * um Cd plausível e errado por um fator constante, que é o pior tipo de erro
+ * porque sobrevive a toda inspeção visual.
+ */
+export function shaderForcas({ nbuf = 1 } = {}) {
+  const plano = planoDeBuffers(nbuf);
+  const d = dialeto(plano);
+
+  const L = [];
+  L.push('/* GERADO por src/core/emit/wgsl.js */');
+  L.push('');
+  L.push(...declaracoes(nbuf, true));
+  L.push('@group(0) @binding(' + (3 + 2 * nbuf) + ') var<storage, read_write> parciais: array<vec4<f32>>;');
+  L.push('');
+  L.push('var<workgroup> sh: array<vec4<f32>, 64>;');
+  L.push('');
+  L.push('@compute @workgroup_size(64, 1, 1)');
+  L.push('fn main(@builtin(global_invocation_id) gid: vec3<u32>,');
+  L.push('        @builtin(local_invocation_index) lid: u32,');
+  L.push('        @builtin(workgroup_id) wid: vec3<u32>,');
+  L.push('        @builtin(num_workgroups) nwg: vec3<u32>) {');
+  L.push('  var f = vec3<f32>(0.0, 0.0, 0.0);');
+  L.push('  let dentro = gid.x < P.dim.x && gid.y < P.dim.y && gid.z < P.dim.z;');
+  L.push('');
+  L.push('  if (dentro) {');
+  L.push('    let N = P.dim.x * P.dim.y * P.dim.z;');
+  L.push(...envolvimento().map(s => '  ' + s));
+  L.push('    let cell = z0 * nxny + y0 * P.dim.x + x0;');
+  L.push(`    if (tipo[cell] == ${TIPO.FLUIDO}u) {`);
+
+  for (let i = 1; i < Q; i++) {          // i=0 não cruza superfície nenhuma
+    const c = C[i];
+    const j = OPP[i];
+    L.push(`      {`);
+    L.push(`        let nb = ${d.vizinho(c[0], c[1], c[2])};`);
+    L.push(`        let tb = tipo[nb];`);
+    L.push(`        if (tb == ${TIPO.SOLIDO}u || tb == ${TIPO.SOLIDO_MOVEL}u) {`);
+    L.push(`          let q = ${d.lerPop(i, 'cell')} + ${d.lerPop(j, 'nb')} + ${num(2 * W[i])};`);
+    const termos = [];
+    for (let a = 0; a < 3; a++) {
+      if (c[a] === 0) { termos.push('0.0'); continue; }
+      termos.push(c[a] > 0 ? 'q' : '-q');
+    }
+    L.push(`          f += vec3<f32>(${termos.join(', ')});`);
+    L.push(`        }`);
+    L.push(`      }`);
+  }
+
+  L.push('    }');
+  L.push('  }');
+  L.push('');
+  L.push('  // redução em árvore dentro do workgroup: 64 valores viram 1');
+  L.push('  sh[lid] = vec4<f32>(f, 0.0);');
+  L.push('  workgroupBarrier();');
+  for (let s = 32; s > 0; s >>= 1) {
+    L.push(`  if (lid < ${s}u) { sh[lid] = sh[lid] + sh[lid + ${s}u]; }`);
+    L.push('  workgroupBarrier();');
+  }
+  L.push('  if (lid == 0u) {');
+  L.push('    parciais[wid.x + nwg.x * (wid.y + nwg.y * wid.z)] = sh[0];');
+  L.push('  }');
+  L.push('}');
+  return L.join('\n');
+}
+
+/**
+ * Segunda passada: soma o vetor de parciais num único vec4.
+ *
+ * Um workgroup só. O vetor de parciais tem da ordem de 10^5 entradas e cada
+ * invocação percorre uma fatia com passo 256, o que mantém a leitura
+ * coalescida. A alternativa — atomicAdd em ponto flutuante — não existe em
+ * WGSL sem emular com inteiros de ponto fixo, e ponto fixo aqui trocaria um
+ * problema resolvido por uma escolha de escala que ninguém saberia justificar.
+ */
+export function shaderReduzir() {
+  const L = [];
+  L.push('/* GERADO por src/core/emit/wgsl.js */');
+  L.push('');
+  L.push('@group(0) @binding(0) var<uniform> nPart: vec4<u32>;');
+  L.push('@group(0) @binding(1) var<storage, read> parciais: array<vec4<f32>>;');
+  L.push('@group(0) @binding(2) var<storage, read_write> total: array<vec4<f32>>;');
+  L.push('');
+  L.push('var<workgroup> sh: array<vec4<f32>, 256>;');
+  L.push('');
+  L.push('@compute @workgroup_size(256, 1, 1)');
+  L.push('fn main(@builtin(local_invocation_index) lid: u32) {');
+  L.push('  var acc = vec4<f32>(0.0);');
+  L.push('  var i = lid;');
+  L.push('  loop {');
+  L.push('    if (i >= nPart.x) { break; }');
+  L.push('    acc = acc + parciais[i];');
+  L.push('    i = i + 256u;');
+  L.push('  }');
+  L.push('  sh[lid] = acc;');
+  L.push('  workgroupBarrier();');
+  for (let s = 128; s > 0; s >>= 1) {
+    L.push(`  if (lid < ${s}u) { sh[lid] = sh[lid] + sh[lid + ${s}u]; }`);
+    L.push('  workgroupBarrier();');
+  }
+  L.push('  if (lid == 0u) { total[0] = sh[0]; }');
   L.push('}');
   return L.join('\n');
 }

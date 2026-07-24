@@ -1,0 +1,295 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CFD2026 — validação contra correlações</title>
+<style>
+  body { font: 13px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace;
+         background: #0e1014; color: #d6dae2; margin: 0; padding: 24px 28px; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .04em;
+       text-transform: uppercase; color: #7b8496; margin: 0 0 6px; }
+  h2 { font-size: 13px; font-weight: 600; color: #d6dae2; margin: 24px 0 6px;
+       border-bottom: 1px solid #232833; padding-bottom: 5px; }
+  p.nota { color: #7b8496; max-width: 78ch; margin: 4px 0 14px; }
+  table { border-collapse: collapse; margin: 4px 0; }
+  td, th { padding: 2px 18px 2px 0; text-align: left; vertical-align: top; }
+  td:first-child, th:first-child { color: #7b8496; white-space: nowrap; }
+  th { color: #5d6473; font-weight: 400; border-bottom: 1px solid #232833; }
+  .excelente { color: #4ec9a0; } .aceitável { color: #8fd48a; }
+  .qualitativo { color: #e0af68; } .discordante, .indefinido { color: #f0616d; }
+  .num { color: #94c8ff; }
+  progress { width: 240px; height: 8px; }
+</style>
+<h1>CFD2026 — validação contra correlações</h1>
+<p class="nota">Cada caso roda o solver completo — voxelização, contornos de túnel, troca de momento —
+e compara o resultado com um ajuste experimental publicado. Re é baixo de propósito: nessa faixa o
+lattice honra a viscosidade física sem ajuda do LES, então o que está sendo medido é o solver e não a
+calibração do modelo sub-grid.</p>
+<div id="saida">iniciando…</div>
+
+<script>
+/* Um `await` no topo de um modulo que rejeita nao vira excecao visivel: o
+   modulo simplesmente para, sem nada no console. Sem esta captura, um erro de
+   WebGPU no meio da suite aparece como uma pagina que congelou. */
+window.__erro = null;
+addEventListener('unhandledrejection', e => {
+  window.__erro = String(e.reason && e.reason.stack || e.reason);
+  document.body.insertAdjacentHTML('beforeend',
+    '<pre style="color:#f0616d;white-space:pre-wrap">' + window.__erro + '</pre>');
+});
+addEventListener('error', e => {
+  window.__erro = String(e.error && e.error.stack || e.message);
+  document.body.insertAdjacentHTML('beforeend',
+    '<pre style="color:#f0616d;white-space:pre-wrap">' + window.__erro + '</pre>');
+});
+</script>
+<script type="module">
+import { sondar, PRESETS } from '../src/backend/caps.js';
+import { SolverWebGPU } from '../src/backend/webgpu/solver.js';
+import { Units, stepsForFlowthrough } from '../src/core/units.js';
+import { montarTipos, corpoAnalitico, areaFrontalCorpo } from '../src/core/tunel.js';
+import { coeficientes, JanelaCd, strouhal } from '../src/core/forces.js';
+import { CASOS, classificar, cilindroStrouhal, uLbParaOmega } from '../src/core/validacao.js';
+import { nuFromOmega } from '../src/core/lattice.js';
+
+const out = document.getElementById('saida');
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const el = h => { const d = document.createElement('div'); d.innerHTML = h; out.appendChild(d); return d; };
+const linha = (k,v) => el(`<table><tr><td>${esc(k)}</td><td>${v}</td></tr></table>`);
+out.textContent = '';
+
+const caps = await sondar();
+const gpu = caps.backends.find(b => b.id === 'webgpu');
+if (!gpu?.disponivel) { el('<p class="discordante">Sem WebGPU.</p>'); throw new Error('sem webgpu'); }
+const device = await SolverWebGPU.criarDevice(gpu.adapter);
+
+const resumo = [];
+
+/* ─────────────────────────────────────────────────── 1. Poiseuille / Couette */
+
+el('<h2>1 — Couette: a parede está onde o TRT diz que está?</h2>');
+el('<p class="nota">Duas paredes paralelas, a de cima movendo-se. Em regime a solução é uma reta exata, ' +
+   'e o que se mede é a POSIÇÃO EFETIVA das paredes: com bounce-back de meio-caminho e Λ = 3/16 elas ' +
+   'ficam no meio entre nós, e a reta vai de 0 a U ao longo de (nz−2) células mais uma de cada lado. ' +
+   'Se a parede escorregar com a viscosidade — o defeito que o TRT existe para curar — a inclinação ' +
+   'medida muda com ω e este teste mostra.</p>');
+
+{
+  const nz = 34, nx = 8, ny = 8;
+  const U = 0.04;
+  const tabela = [];
+  for (const omega of [0.7, 1.0, 1.6]) {
+    const s = await SolverWebGPU.criar(device, { nx, ny, nz });
+    const tipo = new Uint32Array(s.N);
+    const CEL = { SOLIDO: 1, SOLIDO_MOVEL: 4 };
+    for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+      tipo[(0 * ny + y) * nx + x] = CEL.SOLIDO;                 // piso parado
+      tipo[((nz - 1) * ny + y) * nx + x] = CEL.SOLIDO_MOVEL;    // topo móvel
+    }
+    s.definirTipos(tipo);
+    s.configurar({ omegaPlus: omega, lesCs: 0, inletU: [0,0,0], beltU: [U,0,0],
+                   esponja: { inicio: 1e9, comprimento: 1 } });
+    s.inicializar();
+    /* tempo de difusão através do canal: H²/ν, com folga */
+    const H = nz - 2;
+    const passos = Math.ceil(4 * H * H / nuFromOmega(omega));
+    for (let k = 0; k < passos; k += 2000) s.passo(Math.min(2000, passos - k));
+    s.atualizarMacros();
+    const m = await s.lerMacros();
+
+    /* perfil médio em x,y */
+    const perfil = [];
+    for (let z = 1; z < nz - 1; z++) {
+      let acc = 0;
+      for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++)
+        acc += m[(((z * ny + y) * nx + x)) * 4];
+      perfil.push(acc / (nx * ny));
+    }
+    /* regressão linear: u = a*z + b, esperado a = U/H com paredes em z=0.5 e nz-1.5 */
+    const n = perfil.length;
+    let sx=0, sy=0, sxx=0, sxy=0;
+    perfil.forEach((u, i) => { const z = i + 1; sx+=z; sy+=u; sxx+=z*z; sxy+=z*u; });
+    const a = (n*sxy - sx*sy) / (n*sxx - sx*sx);
+    const b = (sy - a*sx) / n;
+    const aTeorico = U / H;
+    /* z onde u = 0 e onde u = U: as paredes efetivas */
+    const z0 = -b / a, z1 = (U - b) / a;
+    const c = classificar(a, aTeorico);
+    tabela.push({ omega, a, aTeorico, c, z0, z1 });
+    s.destruir();
+  }
+
+  el('<table><tr><th>ω⁺</th><th>inclinação medida</th><th>teórica U/H</th><th>erro</th>' +
+     '<th>parede inferior</th><th>parede superior</th></tr>' +
+     tabela.map(r => `<tr><td class="num">${r.omega.toFixed(2)}</td>` +
+       `<td class="num">${r.a.toExponential(4)}</td>` +
+       `<td class="num">${r.aTeorico.toExponential(4)}</td>` +
+       `<td class="${r.c.nivel}">${(r.c.erro*100>=0?'+':'')}${(r.c.erro*100).toFixed(2)}%</td>` +
+       `<td class="num">z = ${r.z0.toFixed(3)}</td>` +
+       `<td class="num">z = ${r.z1.toFixed(3)}</td></tr>`).join('') + '</table>');
+  el('<p class="nota">As paredes efetivas devem sair em z ≈ 0,5 e z ≈ ' + (34-1.5).toFixed(1) +
+     ' — meia célula para dentro do primeiro nó sólido, independente de ω. É esse ' +
+     '<em>independente de ω</em> que Λ = 3/16 compra.</p>');
+
+  const pior = Math.max(...tabela.map(r => Math.abs(r.c.erro)));
+  const espalhamento = Math.max(...tabela.map(r=>r.z0)) - Math.min(...tabela.map(r=>r.z0));
+  resumo.push({ nome: 'Couette: inclinação bate com U/H', ok: pior < 0.05,
+                det: `pior erro ${(pior*100).toFixed(2)}%` });
+  resumo.push({ nome: 'Couette: parede não se move com ω (Λ = 3/16)', ok: espalhamento < 0.06,
+                det: `espalhamento de ${espalhamento.toFixed(4)} célula entre ω = 0,7 e 1,6` });
+}
+
+/* ────────────────────────────────────────────────── 2. corpos vs correlação */
+
+el('<h2>2 — Cd de corpos canônicos contra correlação experimental</h2>');
+
+const barra = el('<div></div>');
+const marcarProgresso = (t) => { barra.innerHTML = `<span style="color:#7b8496">${esc(t)}</span>`; };
+
+const PRESET = PRESETS.find(p => p.id === 'baixa');
+const linhas = [];
+
+const PROFUNDO = new URLSearchParams(location.search).has('profundo');
+for (const caso of CASOS.filter(c => PROFUNDO || !c.profundo)) {
+  const tCaso = performance.now();
+  marcarProgresso(`rodando ${caso.nome}…`);
+
+  const grade = caso.grade;
+  const D = caso.diametroCelulas;
+
+  /* Fixamos omega (estabilidade) e derivamos u_lb — ver uLbParaOmega. */
+  const uLb = uLbParaOmega(caso.re, D, 1.90);
+  const nuLb = uLb * D / caso.re;
+  const omega = 1 / (nuLb / (1/3) + 0.5);
+
+  const units = new Units({
+    lengthM: 0.01, speedMs: 0.15, cellsPerLength: D,
+    uLb, rollingRoad: false, lesCs: 0,
+  });
+  /* sobrescreve para o Re pedido exatamente */
+  units.nuLb = nuLb; units.omegaPlus = omega;
+  units.reLattice = uLb * D / nuLb;
+
+  const s = await SolverWebGPU.criar(device, grade);
+  const corpo = corpoAnalitico(grade, {
+    tipo: caso.forma,
+    cx: grade.nx * 0.30, cy: grade.ny * 0.5, cz: grade.nz * 0.5,
+    raio: D / 2,
+  });
+  /* Corpo isolado: sem piso nem esteira. As seis faces são espelho, entrada e
+     saída. Uma esfera perto do chão não é a esfera da correlação. */
+  const { tipo, esponja } = montarTipos({ grade, corpo, esteira: false });
+  /* substitui o piso sólido por espelho — corpo em ar livre */
+  for (let y = 0; y < grade.ny; y++) for (let x = 0; x < grade.nx; x++) {
+    const i = (0 * grade.ny + y) * grade.nx + x;
+    if (x > 0 && x < grade.nx - 1) tipo[i] = 6;   // ESPELHO_Z
+  }
+  s.definirTipos(tipo);
+  s.configurar({ omegaPlus: omega, lesCs: 0, inletU: [uLb, 0, 0], esponja });
+  s.inicializar();
+
+  const af = areaFrontalCorpo(corpo, grade);
+  const afTeorica = caso.forma === 'esfera'
+    ? Math.PI * (D/2) ** 2
+    : D * (grade.ny - 2);
+
+  const travessia = Math.ceil(grade.nx / uLb);
+  const transiente = Math.round(caso.travessiasTransiente * travessia);
+  const medida = Math.round(caso.travessiasMedida * travessia);
+
+  /* Semeia a assimetria, se o caso pedir: entrada inclinada por alguns passos
+     e depois endireitada. Ver `perturbacao` em validacao.js. */
+  if (caso.perturbacao) {
+    const t = caso.perturbacao.grausGuinada * Math.PI / 180;
+    s.configurar({ omegaPlus: omega, lesCs: 0, esponja,
+      inletU: [uLb * Math.cos(t), 0, uLb * Math.sin(t)] });
+    s.passo(caso.perturbacao.passos);
+    s.configurar({ omegaPlus: omega, lesCs: 0, inletU: [uLb, 0, 0], esponja });
+  }
+
+  for (let k = 0; k < transiente; k += 2000) {
+    s.passo(Math.min(2000, transiente - k));
+    await new Promise(r => setTimeout(r));
+    marcarProgresso(`${caso.nome}: transiente ${(100*k/transiente).toFixed(0)}%`);
+  }
+
+  let divergiuEm = null;
+  const jan = new JanelaCd(4000);
+  const serieCl = [];
+  const AMOSTRA = 100;
+  for (let k = 0; k < medida; k += AMOSTRA) {
+    s.passo(AMOSTRA);
+    const f = await s.medirForcas();
+    const co = coeficientes(f, units, af, grade, { corrigirBloqueio: true,
+      theta: caso.forma === 'cilindro' ? 1.0 : 2.5 });
+    if (!Number.isFinite(co.cd)) { divergiuEm = s.passos; break; }
+    jan.adicionar(co.cd);
+    serieCl.push(co.cl);
+    if ((k / AMOSTRA) % 20 === 0) {
+      marcarProgresso(`${caso.nome}: medindo ${(100*k/medida).toFixed(0)}%`);
+      await new Promise(r => setTimeout(r));
+    }
+  }
+
+  const cdMedio = jan.media, cdDesvio = jan.desvio;
+  const ref = caso.referencia();
+  const c = classificar(cdMedio, ref);
+
+  let stInfo = null;
+  if (caso.referenciaSt) {
+    const st = strouhal(serieCl, AMOSTRA, D, uLb);
+    stInfo = { medido: st.st, ref: caso.referenciaSt(), motivo: st.motivo };
+  }
+
+  linhas.push({ divergiuEm, uLb, segundos: (performance.now()-tCaso)/1000, caso, cdMedio, cdDesvio, ref, c, af, afTeorica, stInfo,
+                bloqueio: af / (grade.ny * grade.nz), omega, nuLb });
+  resumo.push({ nome: `${caso.nome}: Cd vs correlação`, ok: c.ok && !divergiuEm,
+                det: divergiuEm
+                  ? `DIVERGIU no passo ${divergiuEm} (ω = ${omega.toFixed(4)})`
+                  : `${cdMedio.toFixed(3)} vs ${ref.toFixed(3)} (${c.pct.toFixed(1)}%, ${c.nivel})` });
+  if (stInfo && Number.isFinite(stInfo.medido) && stInfo.ref > 0) {
+    const cs = classificar(stInfo.medido, stInfo.ref);
+    resumo.push({ nome: `${caso.nome}: Strouhal`, ok: cs.ok,
+                  det: `${stInfo.medido.toFixed(4)} vs ${stInfo.ref.toFixed(4)} (${cs.pct.toFixed(1)}%)` });
+  }
+  s.destruir();
+}
+barra.innerHTML = '';
+
+el('<table><tr><th>caso</th><th>ω⁺</th><th>u_lb</th><th>bloqueio</th><th>Cd medido</th>' +
+   '<th>correlação</th><th>erro</th><th>Strouhal</th></tr>' +
+   linhas.map(r => {
+     let st = '—';
+     if (r.stInfo) {
+       st = Number.isFinite(r.stInfo.medido)
+         ? `<span class="num">${r.stInfo.medido.toFixed(4)}</span> vs ${r.stInfo.ref.toFixed(4)}`
+         : `<span class="qualitativo">${esc(r.stInfo.motivo ?? 'n/d')}</span>`;
+     }
+     return `<tr><td>${esc(r.caso.nome)}</td>` +
+       `<td class="num">${r.omega.toFixed(4)}</td>` +
+       `<td class="num">${r.uLb.toFixed(4)}</td>` +
+       `<td class="num">${(r.bloqueio*100).toFixed(2)}%</td>` +
+       `<td class="num">${r.cdMedio.toFixed(3)} ± ${r.cdDesvio.toFixed(3)}</td>` +
+       `<td class="num">${r.ref.toFixed(3)}</td>` +
+       `<td class="${r.c.nivel}">${(r.c.erro*100>=0?'+':'')}${(r.c.erro*100).toFixed(1)}% ${r.c.nivel}</td>` +
+       `<td>${st}</td></tr>`;
+   }).join('') + '</table>');
+
+el('<table style="margin-top:10px"><tr><th>caso</th><th>área frontal medida</th>' +
+   '<th>área frontal exata</th><th>erro de voxelização</th></tr>' +
+   linhas.map(r => `<tr><td>${esc(r.caso.nome)}</td>` +
+     `<td class="num">${r.af}</td><td class="num">${r.afTeorica.toFixed(1)}</td>` +
+     `<td class="${Math.abs(r.af/r.afTeorica-1)<0.06?'excelente':'qualitativo'}">` +
+     `${((r.af/r.afTeorica-1)*100).toFixed(1)}%</td></tr>`).join('') + '</table>');
+
+/* ───────────────────────────────────────────────────────────────── resumo */
+
+el('<h2>resumo</h2>');
+el('<table>' + resumo.map(r =>
+  `<tr><td class="${r.ok?'excelente':'discordante'}">${r.ok?'PASSOU':'FALHOU'}</td>` +
+  `<td style="color:#d6dae2">${esc(r.nome)}</td>` +
+  `<td style="color:#7b8496">${esc(r.det ?? '')}</td></tr>`).join('') + '</table>');
+const ok = resumo.filter(r=>r.ok).length;
+el(`<p style="font-size:15px" class="${ok===resumo.length?'excelente':'discordante'}">${ok}/${resumo.length}</p>`);
+window.__val = { ok, total: resumo.length, resumo, linhas: linhas.map(r=>({
+  nome: r.caso.nome, cd: r.cdMedio, desvio: r.cdDesvio, ref: r.ref,
+  erroPct: r.c.pct, nivel: r.c.nivel, st: r.stInfo })) };
+</script>

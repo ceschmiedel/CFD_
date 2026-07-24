@@ -4,8 +4,8 @@
     {
       "name": "cfd2026",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "http.server", "8600", "--bind", "127.0.0.1"],
-      "port": 8600
+      "runtimeArgs": ["tools/servidor.py", "8601"],
+      "port": 8601
     }
   ]
 }

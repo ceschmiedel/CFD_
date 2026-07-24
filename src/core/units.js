@@ -57,10 +57,39 @@ export const AR = {
   c: 343.2,         // m/s — para checar o Mach físico
 };
 
-/* Onde os modos fantasma começam a tocar. Medido, não deduzido. Baixar isto
- * compra estabilidade e custa Reynolds resolvido, na proporção exata. */
-export const OMEGA_MAX = 1.98;
-export const OMEGA_MAX_PISO_PARADO = 1.92;
+/*
+ * Onde os modos fantasma começam a tocar. MEDIDO, com um veículo dentro do
+ * túnel — não deduzido, e não medido com o túnel vazio.
+ *
+ * A primeira versão deste arquivo trazia 1,98, que é o número que se obtém
+ * testando escoamento uniforme sobre uma esteira. Escoamento uniforme é
+ * solução EXATA do lattice: o solver o reproduz até o zero de máquina a
+ * ω = 1,98, e a conclusão de que 1,98 é utilizável não se sustenta, porque
+ * nada ali está sendo pedido do solver.
+ *
+ * Com um carro voxelizado — cuja superfície é uma escada de degraus, cada um
+ * um ponto de cisalhamento alto — a medição (tests/estabilidade.html) dá:
+ *
+ *     ω = 1,98   diverge em ~1 000 passos      com e sem esteira
+ *     ω = 1,96   diverge em 1 000 a 3 000      com e sem esteira
+ *     ω = 1,94   diverge com esteira em 3 000; sem esteira aguenta
+ *     ω = 1,92   estável nos dois casos, mas |u|max chega a 4x a corrente livre
+ *     ω = 1,90   estável nos dois casos, |u|max em 2,1x — que é escoamento
+ *
+ * 1,90 é a escolha: 1,92 sobrevive, e um pico de quatro vezes a corrente livre
+ * em volta de um carro não é escoamento, é o solver já tocando os modos que
+ * vão matá-lo mais adiante.
+ *
+ * A conta que isso custa está em `verdict`, e é grande: ν sobe 5,2 vezes e o
+ * Reynolds resolvido cai na mesma proporção, de ~5,3e3 para ~1,0e3. É o preço
+ * honesto de um número que não diverge.
+ *
+ * A esteira NÃO compra teto aqui, ao contrário do que a versão anterior
+ * supunha. Ela continua valendo por física — o assoalho vê chão em movimento,
+ * como na estrada — mas não por estabilidade.
+ */
+export const OMEGA_MAX = 1.90;
+export const OMEGA_MAX_PISO_PARADO = 1.90;
 
 export const NU_MIN = nuFromOmega(OMEGA_MAX);
 

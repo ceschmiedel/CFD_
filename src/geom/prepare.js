@@ -110,6 +110,62 @@ export function palpitarEixos(pos, ext) {
   };
 }
 
+/**
+ * Decide se o modelo está de costas para o vento.
+ *
+ * `palpitarEixos` acha o EIXO do escoamento — a maior extensão — e para por
+ * aí. O sinal fica indeterminado, e metade dos modelos entra no túnel de ré.
+ * O sintoma para quem olha é inconfundível: as partículas chegam pela traseira
+ * do carro. O sintoma nos NÚMEROS não é nenhum: sai um Cd perfeitamente
+ * formatado, do carro andando para trás.
+ *
+ * O sinal que resolve é a ALTURA, não a área. Veículo de estrada tem o nariz
+ * baixo e a traseira mais alta — porta-malas, tampa de motor, asa — e isso é
+ * decisão de projeto (visibilidade e arrasto), não coincidência. Medindo a
+ * altura máxima da silhueta nos 20% de cada ponta, nos cinco modelos deste
+ * repositório o critério acerta os cinco:
+ *
+ *     tesla    7 -> 9      audi   5 -> 9     RB16B  2 -> 6    (todos corretos)
+ *     ferrari  7 -> 2      DeLorean 10 -> 5              (ambos invertidos)
+ *
+ * O perfil de ÁREA não separa: o Tesla dá 88 na frente e 106 atrás, e o Audi
+ * dá 72 e 50 — dois carros bem orientados com o sinal em direções opostas.
+ *
+ * Onde falha: uma cunha (Countach), uma picape, qualquer coisa mais alta na
+ * frente que atrás. Por isso `confianca` sai junto e a interface oferece a
+ * inversão manual — um palpite exposto vale mais que um palpite escondido.
+ */
+export function palpitarSentido(pos, ordem, ext) {
+  const eixoX = ordem[0], eixoZ = ordem[2];
+  const x0 = ext.min[eixoX], comprimento = Math.max(ext.tamanho[eixoX], 1e-12);
+  const zBase = ext.min[eixoZ];
+
+  /* Altura máxima em cada fatia; 12 fatias bastam e são imunes a um vértice
+   * solto que um máximo global pegaria. */
+  const N = 12;
+  const alturas = new Float64Array(N);
+  for (let i = 0; i < pos.length; i += 3) {
+    const x = pos[i + eixoX], z = pos[i + eixoZ];
+    if (!Number.isFinite(x + z)) continue;
+    const k = Math.min(N - 1, Math.max(0, Math.floor((x - x0) / comprimento * N)));
+    const h = z - zBase;
+    if (h > alturas[k]) alturas[k] = h;
+  }
+
+  const media = (a, b) => {
+    let s = 0;
+    for (let k = a; k < b; k++) s += alturas[k];
+    return s / (b - a);
+  };
+  const frente = media(0, Math.round(N * 0.2));
+  const tras = media(N - Math.round(N * 0.2), N);
+
+  const escala = Math.max(frente, tras, 1e-12);
+  const confianca = Math.abs(tras - frente) / escala;
+
+  return { inverter: frente > tras, alturaFrente: frente, alturaTras: tras, confianca };
+}
+
 /* ────────────────────────────────────────────────────── palpite de unidade */
 
 /**
@@ -255,10 +311,22 @@ export function preparar(malha, grade, opcoes = {}) {
   const unidade = opcoes.unidade ?? palpitarUnidade(comprimentoArquivo);
   const comprimentoM = opcoes.comprimentoM ?? (comprimentoArquivo * unidade.fator);
 
+  const sentido = palpitarSentido(malha.positions, eixos.ordem, ext);
+  const inverter = opcoes.inverterSentido ?? sentido.inverter;
+
+  /*
+   * Meia-volta em torno do vertical (x -> -x, y -> -y), e não espelhamento só
+   * em x. As duas põem o nariz contra o vento; a primeira é uma ROTAÇÃO e a
+   * segunda é uma reflexão, que inverte a lateralidade do modelo. Num carro
+   * quase simétrico isso passa despercebido — até alguém carregar um modelo
+   * com escapamento de um lado só, ou medir força lateral em guinada.
+   */
+  const espelhar = opcoes.espelhar ?? (inverter ? [true, true, false] : [false, false, false]);
+
   const colocada = colocar({
     positions: malha.positions,
     ordem: eixos.ordem,
-    espelhar: opcoes.espelhar,
+    espelhar,
     grade,
     celulasPorComprimento: opcoes.celulasPorComprimento ?? Math.round(grade.nx * 0.34),
     fracaoEntrada: opcoes.fracaoEntrada,
@@ -271,10 +339,16 @@ export function preparar(malha, grade, opcoes = {}) {
     ...colocada,
     indices: malha.indices,
     eixos,
+    sentido: { ...sentido, aplicado: inverter, manual: opcoes.inverterSentido != null },
     unidade,
     comprimentoM,
     extentosOriginais: ext,
     avisos: [...(malha.avisos ?? []), ...colocada.avisos,
-      ...(unidade.aviso ? [unidade.aviso] : [])],
+      ...(unidade.aviso ? [unidade.aviso] : []),
+      ...(sentido.confianca < 0.12
+        ? [`frente e traseira quase igualmente altas (${sentido.alturaFrente.toFixed(2)} vs ` +
+           `${sentido.alturaTras.toFixed(2)}): o sentido é um chute. Confira se o vento ` +
+           'chega pelo nariz e inverta se não chegar.']
+        : [])],
   };
 }

@@ -58,14 +58,23 @@ struct Cena {
 @group(0) @binding(0) var<uniform> C: Cena;
 @group(0) @binding(1) var<storage, read> macros: array<vec4<f32>>;
 
-// Do espaço do lattice (célula) para o espaço de mundo normalizado, com a
-// origem no centro do piso — assim a órbita gira em torno do corpo e não do
-// canto do domínio.
+// Do espaço do lattice (célula) para o espaço de mundo, com a origem no centro
+// do piso — assim a órbita gira em torno do corpo e não do canto do domínio.
+//
+// UM ÚNICO FATOR PARA OS TRÊS EIXOS. A versão anterior dividia cada eixo pela
+// SUA dimensão (x/nx, y/ny, z/nz), o que mapeia o domínio para um cubo — e o
+// domínio não é cúbico. Num túnel 320x160x128, um carro de 32x15x10 células,
+// cuja proporção real é 1 : 0,47 : 0,31, era desenhado em 1 : 0,94 : 0,78:
+// duas vezes mais largo e duas vezes e meia mais alto do que é. O modelo
+// aparecia atarracado, e a impressão de "malha deformada" era inteiramente do
+// renderizador — a geometria que o solver usa sempre esteve com escala
+// uniforme.
 fn paraMundo(p: vec3<f32>) -> vec3<f32> {
+  let k = C.escala.x * 2.0;                 // escala.x = 1/nx, comum aos três
   return vec3<f32>(
-    (p.x * C.escala.x - 0.5) * 2.0,
-    (p.y * C.escala.y - 0.5) * 2.0,
-    p.z * C.escala.z * 2.0);
+    (p.x - f32(C.dim.x) * 0.5) * k,
+    (p.y - f32(C.dim.y) * 0.5) * k,
+    p.z * k);
 }
 
 fn amostrar(p: vec3<f32>) -> vec4<f32> {
@@ -237,7 +246,10 @@ fn vs(@builtin(vertex_index) vi: u32) -> Saida {
   let t = q[vi];
   var o: Saida;
   o.uv = t;
-  o.pos = C.viewProj * vec4<f32>((t.x - 0.5) * 2.0, (t.y - 0.5) * 2.0, 0.0, 1.0);
+  // O piso é o chão do domínio inteiro, então ele passa por paraMundo como
+  // qualquer outra coisa — senão a grade deixa de casar com o lattice.
+  let p = vec3<f32>(t.x * f32(C.dim.x), t.y * f32(C.dim.y), 0.0);
+  o.pos = C.viewProj * vec4<f32>(paraMundo(p), 1.0);
   return o;
 }
 
@@ -398,6 +410,25 @@ export class Renderer {
         { binding: 3, resource: { buffer: solver.tipo } },
       ],
     });
+  }
+
+  /**
+   * Aponta a câmera para o corpo, e não para o domínio.
+   *
+   * Com a escala uniforme corrigida o domínio tem 2 unidades de comprimento e
+   * um carro tem 0,2 — enquadrar o domínio deixa o objeto de interesse com um
+   * décimo da tela. `extentos` vem em células, do prepare.
+   */
+  enquadrar(extentos, solver) {
+    const k = 2 / solver.nx;
+    const c = extentos.centro;
+    this.camera.alvo = [
+      (c[0] - solver.nx / 2) * k,
+      (c[1] - solver.ny / 2) * k,
+      c[2] * k,
+    ];
+    const diag = Math.hypot(...extentos.tamanho) * k;
+    this.camera.distancia = Math.max(0.5, diag * 1.9);
   }
 
   /** Sobe a malha do corpo (posições no espaço do lattice). */

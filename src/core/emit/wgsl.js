@@ -98,7 +98,15 @@ function dialeto(plano, prefSrc = 'src', prefDst = 'dst') {
       return `(${eixo(dz, 'z')} * nxny + ${eixo(dy, 'y')} * P.dim.x + ${eixo(dx, 'x')})`;
     },
 
+    letU32: (n, e) => `let ${n} = ${e};`,
     ehTipo: (nome) => `ct == ${CELULA[nome]}u`,
+    ehFluidoEm: (idx) => `tipo[${idx}] == ${CELULA.FLUIDO}u`,
+    tipoEm: (idx) => `tipo[${idx}]`,
+    ehSolidoTipo: (t) =>
+      `(${t} == ${CELULA.SOLIDO}u || ${t} == ${CELULA.SOLIDO_MOVEL}u ` +
+      `|| ${t} == ${CELULA.PAREDE}u)`,
+    velParedeDe: (t) =>
+      `select(vec3<f32>(0.0), P.beltU.xyz, ${t} == ${CELULA.SOLIDO_MOVEL}u)`,
     se: (cond) => [`if (${cond}) {`],
     senaoSe: (cond) => [`} else if (${cond}) {`],
     senao: () => ['} else {'],
@@ -147,29 +155,24 @@ function declaracoes(nbuf, comMacros) {
 function envolvimento() {
   const L = [];
   L.push('  let nxny = P.dim.x * P.dim.y;');
-  L.push('  // Vizinhos por eixo, GRAMPEADOS na borda — não periódicos.');
+  L.push('  // Vizinhos por eixo, com envolvimento PERIÓDICO.');
   L.push('  //');
-  L.push('  // O envolvimento periódico parecia inofensivo: as seis faces do');
-  L.push('  // domínio são células de contorno que sobrescrevem a própria saída,');
-  L.push('  // então o que elas puxam de fora "não importa". Importa muito.');
-  L.push('  // Bounce-back devolve o que CHEGOU — e com o pull periódico o que');
-  L.push('  // chegava ao piso vinha do teto, do outro lado do domínio. O piso');
-  L.push('  // passava a refletir populações do teto para dentro do escoamento,');
-  L.push('  // fechando um laço de realimentação entre as duas faces sem nenhuma');
-  L.push('  // dissipação no caminho.');
+  L.push('  // O envolvimento periódico é a escolha certa porque a condição de');
+  L.push('  // contorno de parede não depende mais dele: com bounce-back no nó de');
+  L.push('  // fluido (ver blocoPull em ir.js), uma célula ao lado do piso jamais');
+  L.push('  // lê o piso — ela devolve a si mesma o que mandou. O que houver do');
+  L.push('  // outro lado do domínio é irrelevante para ela.');
   L.push('  //');
-  L.push('  // Com o túnel vazio isso é invisível: o escoamento é uniforme e o que');
-  L.push('  // vem do teto é idêntico ao que deveria vir. Basta um corpo perturbar');
-  L.push('  // o campo perto do chão para o laço divergir — e ele divergia no mesmo');
-  L.push('  // passo para TODO ω, de 1,82 a 1,98, que é a assinatura de um erro');
-  L.push('  // estrutural e não de um limite de estabilidade.');
-  L.push('  //');
-  L.push('  // Grampear faz a face ler a si mesma: inerte, e o contorno decide o');
-  L.push('  // que sai dali sem consultar o outro lado do mundo.');
+  L.push('  // Houve uma tentativa de grampear em vez de envolver, para impedir que');
+  L.push('  // o piso puxasse do teto. Ela custou o teste de viscosidade: a onda de');
+  L.push('  // cisalhamento é medida num domínio PERIÓDICO, e grampear quebra a');
+  L.push('  // periodicidade em y — a viscosidade medida caiu de 0,3% de erro para');
+  L.push('  // 15 a 53%. O problema do piso era real, mas o grampeamento tratava o');
+  L.push('  // sintoma; a causa era a reflexão acontecer no nó errado.');
   for (const [n, dim] of [['x', 'P.dim.x'], ['y', 'P.dim.y'], ['z', 'P.dim.z']]) {
     L.push(`  let ${n}0 = gid.${n};`);
-    L.push(`  let ${n}m = select(gid.${n} - 1u, gid.${n}, gid.${n} == 0u);`);
-    L.push(`  let ${n}p = select(gid.${n} + 1u, gid.${n}, gid.${n} == ${dim} - 1u);`);
+    L.push(`  let ${n}m = select(gid.${n} - 1u, ${dim} - 1u, gid.${n} == 0u);`);
+    L.push(`  let ${n}p = select(gid.${n} + 1u, 0u, gid.${n} == ${dim} - 1u);`);
   }
   return L;
 }
@@ -185,8 +188,16 @@ function cabecalhoKernel(comMacros) {
   L.push('  let cell = z0 * nxny + y0 * P.dim.x + x0;');
   L.push('');
   L.push('  let ct = tipo[cell];');
-  L.push('  // só a parede marcada como móvel arrasta o fluido junto');
-  L.push(`  let uWall = select(vec3<f32>(0.0), P.beltU.xyz, ct == ${TIPO.SOLIDO_MOVEL}u);`);
+  L.push('');
+  L.push('  // Célula sólida não é simulada. Com o bounce-back acontecendo no nó');
+  L.push('  // de fluido, nada nunca lê as populações de dentro de um sólido — não');
+  L.push('  // há estado ali para manter, nem interior de corpo para divergir, nem');
+  L.push('  // laço para se realimentar. Sair cedo economiza a colisão inteira em');
+  L.push('  // cada célula de casca, piso e parede.');
+  L.push(`  if (ct == ${TIPO.SOLIDO}u || ct == ${TIPO.SOLIDO_MOVEL}u || ct == ${TIPO.PAREDE}u) {`);
+  if (comMacros) L.push('    macros[cell] = vec4<f32>(0.0);');
+  L.push('    return;');
+  L.push('  }');
   L.push('');
   L.push('  let uOmegaPlus = P.omegaPlus;');
   L.push('  let uMagic = P.magic;');
@@ -230,16 +241,14 @@ export function shaderPasso({ nbuf = 1, escreverMacros = true } = {}) {
     L.push('');
     L.push('  // Campo macroscópico para a renderização ler sem refazer a soma.');
     L.push('  //');
-    L.push('  // Zerado dentro do sólido. As populações no interior de um corpo');
-    L.push('  // fechado não têm significado — não há fluido ali, só o que o');
-    L.push('  // bounce-back deixou para trás — e a densidade lá deriva livremente.');
-    L.push('  // Escrevê-las envenena tudo que lê este buffer: as partículas ganham');
-    L.push('  // posições absurdas, e um diagnóstico que varra o domínio inteiro');
-    L.push('  // acusa divergência olhando para células que nunca foram escoamento.');
-    L.push('  // (Foi o que aconteceu aqui: |u| = 3,02 dentro do carro enquanto o');
-    L.push('  // fluido estava em 0,0707.)');
-    L.push('  let ehSol = ct == 1u || ct == 4u || ct == 7u;');
-    L.push('  macros[cell] = select(vec4<f32>(u, delta), vec4<f32>(0.0), ehSol);');
+    L.push('  // As células sólidas já saíram no topo do kernel escrevendo zero,');
+    L.push('  // então o que chega aqui é fluido. Zerar o sólido importa: escrever');
+    L.push('  // a densidade de dentro de um corpo envenena tudo que lê este');
+    L.push('  // buffer — as partículas ganham posições absurdas, e um diagnóstico');
+    L.push('  // que varra o domínio acusa divergência olhando para células que');
+    L.push('  // nunca foram escoamento. (|u| = 3,02 dentro do carro enquanto o');
+    L.push('  // fluido estava em 0,0707: um dia inteiro de depuração no rumo errado.)');
+    L.push('  macros[cell] = vec4<f32>(u, delta);');
   }
   L.push('}');
   return L.join('\n');
@@ -351,7 +360,10 @@ export function shaderForcas({ nbuf = 1 } = {}) {
     /* SOMENTE o corpo. O piso e as paredes do túnel refletem igual mas não
      * entram na conta — ver o cabeçalho de CELULA em ir.js. */
     L.push(`        if (tb == ${TIPO.SOLIDO}u) {`);
-    L.push(`          let q = ${d.lerPop(i, 'cell')} + ${d.lerPop(j, 'nb')} + ${num(2 * W[i])};`);
+    /* Com bounce-back no nó de fluido, o que volta é exatamente o que saiu
+     * (a parede do corpo é estática), então a soma dos dois é o dobro do que
+     * saiu — e o kernel não lê nenhuma população dentro do sólido. */
+    L.push(`          let q = 2.0 * (${d.lerPop(i, 'cell')} + ${num(W[i])});`);
     const termos = [];
     for (let a = 0; a < 3; a++) {
       if (c[a] === 0) { termos.push('0.0'); continue; }

@@ -93,6 +93,8 @@
   <input type="range" id="velocidade" min="5" max="90" step="1" value="30">
   <label>Guinada <span class="val" id="vGuinada">0°</span></label>
   <input type="range" id="guinada" min="-20" max="20" step="1" value="0">
+  <label class="chk"><input type="checkbox" id="inverter"> inverter frente/trás</label>
+  <div id="sentido" style="color:var(--tenue);font-size:10.5px;margin:-2px 0 6px 22px"></div>
   <label class="chk"><input type="checkbox" id="esteira" checked> esteira rolante</label>
   <label class="chk"><input type="checkbox" id="les" checked> LES Smagorinsky</label>
 
@@ -156,6 +158,7 @@ const app = {
   malha: null, corpo: null, areaFrontal: 0, units: null, preset: null,
   janCd: new JanelaCd(900), janCl: new JanelaCd(900),
   quadros: 0, ultimoFps: performance.now(), fps: 0, subpassos: 1,
+  inverterManual: null,
 };
 
 /* ─────────────────────────────────────────────────────────── inicialização */
@@ -259,7 +262,16 @@ async function _montar() {
   const prep = preparar(app.malha, grade, {
     celulasPorComprimento: preset.celulasNoCorpo,
     guinadaGraus: +$('guinada').value,
+    /* null = deixa o palpite decidir; o checkbox so manda depois de tocado */
+    inverterSentido: app.inverterManual,
   });
+  const sd = prep.sentido;
+  $('inverter').checked = sd.aplicado;
+  $('sentido').textContent = sd.manual
+    ? 'definido por você'
+    : `nariz ${sd.aplicado ? 'estava' : 'está'} a favor do vento ` +
+      `(altura ${sd.alturaFrente.toFixed(1)} vs ${sd.alturaTras.toFixed(1)} céls` +
+      `${sd.confianca < 0.12 ? ', palpite fraco' : ''})`;
   const vox = voxelizar(prep.positions, prep.indices, grade);
   app.corpo = vox.tipo;
   app.areaFrontal = areaFrontalCorpo(vox.tipo, grade);
@@ -288,6 +300,7 @@ async function _montar() {
     nParticulas: preset.cells > 8e6 ? 220000 : 150000,
   });
   app.renderer.definirMalha(prep.positions, prep.indices);
+  app.renderer.enquadrar(prep.extentos, app.solver);
 
   aplicarEscoamento();
 
@@ -436,6 +449,8 @@ $('arquivo').onchange = async (e) => {
 $('guinada').oninput = (e) => { $('vGuinada').textContent = `${e.target.value}°`; };
 $('guinada').onchange = () => montar();
 $('esteira').onchange = () => montar();
+$('inverter').onchange = (e) => { app.inverterManual = e.target.checked; montar(); };
+selModelo.addEventListener('change', () => { app.inverterManual = null; });
 for (const id of ['velocidade', 'comprimento', 'les']) {
   $(id).oninput = () => { aplicarEscoamento(); app.janCd.limpar(); app.janCl.limpar(); };
 }

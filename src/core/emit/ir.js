@@ -127,13 +127,60 @@ export function dotC(i, v) {
 
 /* ────────────────────────────────────────────────────── blocos reutilizáveis */
 
-/** Puxa as Q populações dos vizinhos. Este é o streaming. */
+/**
+ * Streaming com BOUNCE-BACK NO NÓ DE FLUIDO.
+ *
+ * Cada população vem do vizinho a montante — a menos que esse vizinho seja
+ * sólido, e nesse caso ela é o que esta própria célula mandou na direção
+ * oposta no passo anterior, voltando refletida.
+ *
+ *     g_i(x) = g_opp(i)^pos-colisão(x)  +  2 w_i rho (c_i . u_parede) / c_s^2
+ *
+ * POR QUE ASSIM, E NÃO REFLETINDO NO NÓ SÓLIDO
+ * -------------------------------------------
+ * A formulação anterior tratava o sólido como um nó que participa do passo:
+ * ele puxava dos vizinhos, invertia os pares e escrevia de volta. É a versão
+ * que aparece em todo tutorial, e funciona — com parede PARADA.
+ *
+ * Com parede móvel ela vaza. O nó do piso está na borda do domínio, e as
+ * direções que apontam para fora dele não têm de onde puxar: com o pull
+ * grampeado, a célula lê a si mesma. Então os pares para cima e para baixo
+ * simplesmente trocam de lugar a cada passo, e o termo de esteira soma momento
+ * nesse par toda vez. Um laço fechado recebendo energia sem nada que dissipe.
+ * Com o piso parado o termo é zero e o laço é inofensivo — foi exatamente essa
+ * a variável que separou o caso estável do instável na medição.
+ *
+ * Restringir a injeção aos links que terminam em fluido adiou o problema de
+ * 1500 para 4500 passos, e não o resolveu: o par continua se auto-alimentando,
+ * só que por um caminho a mais.
+ *
+ * Puxando com bounce-back, o nó sólido deixa de ter estado. Nenhuma população
+ * dentro do corpo é lida por ninguém, não há interior para divergir, não há
+ * laço para realimentar, e a condição de contorno vira o que ela é de fato:
+ * uma regra sobre o que o FLUIDO recebe da parede.
+ *
+ * rho na parede é aproximado por 1. O erro é da ordem de delta, ou seja 1e-4,
+ * contra a alternativa de um segundo passe só para conhecer a densidade antes
+ * de montar o streaming.
+ */
 export function blocoPull(d) {
   const L = [];
-  L.push(d.comentario('streaming: cada população vem do vizinho a montante'));
+  L.push(d.comentario('streaming, com bounce-back onde o vizinho a montante é sólido'));
   for (let i = 0; i < Q; i++) {
     const c = C[i];
-    L.push(d.letF32(`g${i}`, d.lerPop(i, d.vizinho(-c[0], -c[1], -c[2]))));
+    if (i === 0) {
+      L.push(d.letF32('g0', d.lerPop(0, 'cell')));
+      continue;
+    }
+    const j = OPP[i];
+    const fonte = d.vizinho(-c[0], -c[1], -c[2]);
+    L.push(d.letF32(`s${i}`, fonte));
+    L.push(d.letU32(`t${i}`, d.tipoEm(`s${i}`)));
+    L.push(d.letVec3(`uw${i}`, d.velParedeDe(`t${i}`)));
+    L.push(d.letF32(`g${i}`,
+      `select(${d.lerPop(i, `s${i}`)}, ` +
+      `${d.lerPop(j, 'cell')} + ${num(2 * W[i] * INV_CS2)} * (${dotC(i, `uw${i}`)}), ` +
+      `${d.ehSolidoTipo(`t${i}`)})`));
   }
   return L;
 }
@@ -288,11 +335,38 @@ export function blocoColisao(d) {
 export function blocoBounceBack(d) {
   const L = [];
   L.push(d.comentario('sólido: reflete, não coride'));
-  for (let i = 0; i < Q; i++) {
+  L.push(d.setPop(0, 'g0'));
+
+  for (let i = 1; i < Q; i++) {
     const j = OPP[i];
-    if (i === 0) { L.push(d.setPop(0, 'g0')); continue; }
+    const c = C[i];
     const cu = dotC(i, 'uWall');
-    L.push(d.setPop(i, `g${j} + ${num(2 * W[i] * INV_CS2)} * rho * (${cu})`));
+    /*
+     * O termo de parede móvel só entra se a população que sai daqui na direção
+     * i for de fato chegar em FLUIDO.
+     *
+     * POR QUE O PORTÃO EXISTE
+     * -----------------------
+     * Sem ele, a esteira injeta momento em TODA direção de todo nó de parede,
+     * inclusive nas que apontam para dentro de outro sólido ou para fora do
+     * domínio. Essas populações nunca alcançam fluido: elas voltam ao próprio
+     * nó no passo seguinte — o pull é grampeado na borda, então a célula do
+     * piso lê a si mesma — e recebem a injeção de novo. É um laço fechado
+     * ganhando momento todo passo, sem nada que dissipe.
+     *
+     * Com parede PARADA o termo é nulo e o laço é inofensivo, o que explica
+     * por que isto passou despercebido: o solver era estável com o piso
+     * parado a ω = 1,90 e divergia com a esteira ligada no mesmo ω. Foi a
+     * única variável que separou os dois casos.
+     *
+     * Com o portão, a injeção acontece só onde ela significa alguma coisa: no
+     * link que entrega momento ao escoamento.
+     */
+    const viz = d.vizinho(c[0], c[1], c[2]);
+    L.push(d.letF32(`w${i}`,
+      `select(0.0, ${num(2 * W[i] * INV_CS2)} * rho * (${cu}), ` +
+      `${d.ehFluidoEm(viz)})`));
+    L.push(d.setPop(i, `g${j} + w${i}`));
   }
   return L;
 }
@@ -426,8 +500,6 @@ export function emitirPasso(d, { comEsponja = true } = {}) {
     L.push(...corpo.map(s => d.indentar(s)));
   };
 
-  ramo([d.ehTipo('SOLIDO'), d.ehTipo('SOLIDO_MOVEL'), d.ehTipo('PAREDE')].join(' || '),
-    blocoBounceBack(d));
   ramo(d.ehTipo('ESPELHO_Y'), blocoEspelho(d, 1));
   ramo(d.ehTipo('ESPELHO_Z'), blocoEspelho(d, 2));
   ramo(d.ehTipo('ENTRADA'), blocoEntrada(d));

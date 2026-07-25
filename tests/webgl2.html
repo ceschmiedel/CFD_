@@ -45,10 +45,13 @@
  */
 import { sondar, atlasLayout, PRESETS } from '../src/backend/caps.js';
 import {
-  shaderPasso, shaderInit, shaderMacros, VERTEX_COBERTURA, N_ALVOS,
-  planoDeTexturas,
+  shaderPasso, shaderInit, shaderMacros, shaderForcas, shaderReduzir,
+  VERTEX_COBERTURA, N_ALVOS, planoDeTexturas,
 } from '../src/core/emit/glsl.js';
-import { Q } from '../src/core/lattice.js';
+import { SolverWebGPU } from '../src/backend/webgpu/solver.js';
+import { montarTipos, corpoAnalitico } from '../src/core/tunel.js';
+import * as Lat from '../src/core/lattice.js';
+const { Q } = Lat;
 
 const out = document.getElementById('saida');
 const html = [];
@@ -148,12 +151,16 @@ const fontes = {
   passo: shaderPasso(),
   init: shaderInit(),
   macros: shaderMacros(),
+  forcas: shaderForcas(),
+  reduzir: shaderReduzir(),
 };
 
 const progs = {
   passo: programa('passo (streaming + colisão)', fontes.passo),
   init: programa('inicialização', fontes.init),
   macros: programa('campo macroscópico', fontes.macros),
+  forcas: programa('forças por troca de momento', fontes.forcas),
+  reduzir: programa('redução em pirâmide', fontes.reduzir),
 };
 
 /* ───────────────────────────────────── 3. os uniformes existem mesmo? */
@@ -186,12 +193,237 @@ for (let t = 0; t < N_ALVOS; t++) {
 }
 push('</table>');
 
-/* ──────────────────────────────────────────────────────── 5. as fontes */
+/* ─────────────────────────────────── 5. runtime: escoamento uniforme */
 
-h2('5 — código gerado');
+h2('5 — runtime: invariância do escoamento uniforme');
+push('<p style="color:#7b8496;margin:4px 0 10px">Escoamento uniforme é solução exata do LBM: ' +
+  'g_i já está em equilíbrio, o streaming traz o mesmo valor de todo vizinho e a colisão não tem ' +
+  'o que relaxar. É o teste que pega índice trocado — e num backend cujo endereçamento passa por ' +
+  'um atlas 2D, é <em>o</em> teste: qualquer erro no ladrilhamento aparece aqui como deriva.</p>');
+
+const gl2Solver = await import('../src/backend/webgl2/solver.js');
+const { SolverWebGL2 } = gl2Solver;
+
+const GRADE = { nx: 64, ny: 32, nz: 32 };
+const u0 = [0.05, 0, 0];
+
+const glCtx = SolverWebGL2.criarContexto(canvas);
+let sg = await SolverWebGL2.criar(glCtx, GRADE);
+linha('lattice', `${GRADE.nx}×${GRADE.ny}×${GRADE.nz} = ` +
+  `<span class="num">${(sg.N / 1e3).toFixed(0)}k</span> células · atlas ` +
+  `<span class="num">${sg.atlas.w}×${sg.atlas.h}</span> · ` +
+  `${(sg.bytesTotais / 1e6).toFixed(1)} MB`);
+
+sg.definirTipos(new Uint32Array(sg.N));          // tudo fluido
+sg.configurar({ omegaPlus: 1.0, lesCs: 0.0, inletU: u0 });
+sg.inicializar();
+sg.passo(200);
+const mg = await sg.lerMacros();
+
+let maxU = 0, maxD = 0;
+for (let i = 0; i < sg.N; i++) {
+  maxU = Math.max(maxU, Math.abs(mg[i * 4] - u0[0]),
+    Math.abs(mg[i * 4 + 1]), Math.abs(mg[i * 4 + 2]));
+  maxD = Math.max(maxD, Math.abs(mg[i * 4 + 3]));
+}
+linha('erro máx. em u após 200 passos', `<span class="num">${maxU.toExponential(2)}</span>`);
+linha('erro máx. em delta', `<span class="num">${maxD.toExponential(2)}</span>`);
+veredito('escoamento uniforme preservado ao nível do fp32', maxU < 1e-6 && maxD < 1e-6,
+  'tolerância 1e-6');
+sg.destruir();
+
+/* ────────────────────────────── 6. runtime: viscosidade medida */
+
+h2('6 — runtime: decaimento de onda de cisalhamento');
+push('<p style="color:#7b8496;margin:4px 0 10px">O teste quantitativo do operador de colisão, ' +
+  'o mesmo que <a href="nucleo.html" style="color:#7fa9d8">nucleo.html</a> roda no WebGPU. Uma onda ' +
+  'u_x = U₀ sin(2πy/L) decai como exp(−ν k² t); extraímos ν da amplitude e comparamos com ' +
+  'ν = c_s²(1/ω − ½). Se a colisão TRT tiver saído diferente em GLSL, é aqui que aparece.</p>');
+
+const NY = 64, A0 = 0.02, kOnda = 2 * Math.PI / NY;
+const tabela = [];
+for (const omega of [0.6, 1.0, 1.5, 1.8]) {
+  const sv = await SolverWebGL2.criar(glCtx, { nx: 8, ny: NY, nz: 8 });
+  sv.definirTipos(new Uint32Array(sv.N));
+  sv.configurar({ omegaPlus: omega, lesCs: 0.0, inletU: [0, 0, 0] });
+  sv.frente = 'A';
+  sv.definirCampo((x, y) => ({ delta: 0, u: [A0 * Math.sin(kOnda * y), 0, 0] }),
+    Lat.equilibrium);
+
+  const T = 400;
+  sv.passo(T);
+  const mm = await sv.lerMacros();
+
+  /* Projeta no modo senoidal: imune a offset e a ruído de outros modos. */
+  let acc = 0, norm = 0;
+  for (let z = 0; z < sv.nz; z++) {
+    for (let y = 0; y < sv.ny; y++) {
+      const sn = Math.sin(kOnda * y);
+      for (let x = 0; x < sv.nx; x++) {
+        acc += mm[((z * sv.ny + y) * sv.nx + x) * 4] * sn;
+        norm += sn * sn;
+      }
+    }
+  }
+  const amp = acc / norm;
+  const nuT = Lat.nuFromOmega(omega);
+  const nuM = -Math.log(Math.abs(amp) / A0) / (kOnda * kOnda * T);
+  tabela.push({ omega, nuT, nuM, erro: 100 * (nuM - nuT) / nuT });
+  sv.destruir();
+}
+push('<table><tr><td>ω⁺</td><td>ν teórico</td><td>ν medido</td><td>erro</td></tr>' +
+  tabela.map(r => `<tr><td class="num">${r.omega.toFixed(2)}</td>` +
+    `<td class="num">${r.nuT.toExponential(4)}</td>` +
+    `<td class="num">${r.nuM.toExponential(4)}</td>` +
+    `<td class="${Math.abs(r.erro) < 2 ? 'ok' : 'fail'}">` +
+    `${r.erro >= 0 ? '+' : ''}${r.erro.toFixed(2)}%</td></tr>`).join('') + '</table>');
+const pior = Math.max(...tabela.map(r => Math.abs(r.erro)));
+veredito('viscosidade medida bate com ν(ω)', pior < 2,
+  `pior erro ${pior.toFixed(2)}%, tolerância 2% (o resto é erro O(k²) do lattice)`);
+
+/* ──────────────────────── 7. os dois backends resolvem o mesmo caso */
+
+h2('7 — WebGPU e WebGL2 no mesmo caso');
+push('<p style="color:#7b8496;margin:4px 0 10px">A razão de o IR existir. Mesma grade, mesma ' +
+  'esfera, mesmos parâmetros, mesmo número de passos — e a comparação é célula a célula do campo ' +
+  'de velocidade, mais o vetor de força. Discordância aqui é bug de memória ou de despacho de um ' +
+  'dos dois, <em>nunca</em> de modelagem: a física dos dois saiu do mesmo arquivo.</p>');
+
+const gpu = caps.backends.find(b => b.id === 'webgpu');
+if (!gpu?.disponivel) {
+  linha('WebGPU', '<span class="warn">indisponível nesta máquina — sem confronto</span>');
+} else {
+  const GC = { nx: 64, ny: 32, nz: 32 };
+  const corpo = corpoAnalitico(GC, { tipo: 'esfera', cx: 20, cy: 16, cz: 16, raio: 6 });
+  const { tipo: tipos, esponja } = montarTipos({ grade: GC, corpo, esteira: true });
+  const cfg = {
+    omegaPlus: 1.6, lesCs: 0.0, inletU: [0.05, 0, 0], beltU: [0.05, 0, 0],
+    esponja, espessuraCL: 0,
+  };
+  const PASSOS = 300;
+
+  const rodar = async (s) => {
+    s.definirTipos(tipos);
+    s.configurar(cfg);
+    await s.calibrarRepouso();
+    s.inicializar();
+    s.passo(PASSOS);
+    const f = await s.medirForcas();
+    const m = await s.lerMacros();
+    return { f, m };
+  };
+
+  const device = await SolverWebGPU.criarDevice(gpu.adapter);
+  const a = await rodar(await SolverWebGPU.criar(device, GC));
+  const b = await rodar(await SolverWebGL2.criar(glCtx, GC));
+
+  /*
+   * A diferença é procurada com ENDEREÇO, não só com magnitude.
+   *
+   * "8,98e-4 de diferença máxima" não diz nada sozinho: no interior do
+   * escoamento isso é bug de indexação, e num plano de contorno pode ser
+   * apenas os dois backends respondendo perguntas diferentes. Sem saber ONDE,
+   * a única saída seria afrouxar a tolerância até passar — que é como um
+   * backend errado entra na suíte.
+   */
+  let difU = 0, refU = 0, difD = 0, ondeU = null;
+  let difInterior = 0, ondeInterior = null, acimaDeTol = 0;
+  const noContorno = (x, y, z) =>
+    x === 0 || x === GC.nx - 1 || y === 0 || y === GC.ny - 1 ||
+    z === 0 || z === GC.nz - 1;
+  /*
+   * ONDE OS DOIS RESPONDEM A MESMA PERGUNTA.
+   *
+   * O campo macroscópico é amostrado em pontos diferentes do passo nos dois
+   * backends, e isso não é defeito de nenhum dos dois:
+   *
+   *   WebGPU  escreve macros DENTRO do kernel do passo, a partir dos momentos
+   *           pós-streaming e pré-colisão — de graça, porque ele já somou as
+   *           dezenove populações ali.
+   *   WebGL2  não tem esse almoço grátis: escrever junto pediria um sexto alvo
+   *           de cor, que caps.js não garante. O campo sai de um passe
+   *           separado sobre as populações PÓS-colisão já gravadas.
+   *
+   * Para célula de fluido os dois coincidem exatamente, porque a colisão
+   * conserva massa e momento. Deixam de coincidir em dois lugares:
+   *
+   *   nos PLANOS DE CONTORNO, onde o WebGPU relata o que chegou por streaming
+   *   e o WebGL2 relata o que a condição de contorno impôs;
+   *
+   *   na ESPONJA, que mistura o estado pós-colisão com o equilíbrio da
+   *   corrente livre e portanto MUDA os momentos — o WebGPU relata antes da
+   *   mistura, o WebGL2 depois.
+   *
+   * Comparar ali seria comparar duas definições, e o teste só passaria se a
+   * tolerância fosse afrouxada até não medir mais nada. A verificação vale
+   * onde as duas definições coincidem — e as FORÇAS, que saem das populações e
+   * não deste campo, continuam sendo comparadas no domínio inteiro.
+   */
+  const comparavel = (x, y, z) => !noContorno(x, y, z) && x < esponja.inicio;
+
+  for (let z = 0; z < GC.nz; z++) {
+    for (let y = 0; y < GC.ny; y++) {
+      for (let x = 0; x < GC.nx; x++) {
+        const i = (z * GC.ny + y) * GC.nx + x;
+        let d = 0;
+        for (let c = 0; c < 3; c++) {
+          d = Math.max(d, Math.abs(a.m[i * 4 + c] - b.m[i * 4 + c]));
+          refU = Math.max(refU, Math.abs(a.m[i * 4 + c]));
+        }
+        difD = Math.max(difD, Math.abs(a.m[i * 4 + 3] - b.m[i * 4 + 3]));
+        if (d > difU) { difU = d; ondeU = [x, y, z]; }
+        if (comparavel(x, y, z)) {
+          if (d > 1e-5) acimaDeTol++;
+          if (d > difInterior) { difInterior = d; ondeInterior = [x, y, z]; }
+        }
+      }
+    }
+  }
+  const difF = Math.max(...[0, 1, 2].map(c => Math.abs(a.f[c] - b.f[c])));
+  const magF = Math.hypot(...a.f);
+
+  push('<table><tr><td>grandeza</td><td>WebGPU</td><td>WebGL2</td><td>diferença</td></tr>' +
+    [0, 1, 2].map(c => `<tr><td>força ${'xyz'[c]}</td>` +
+      `<td class="num">${a.f[c].toExponential(4)}</td>` +
+      `<td class="num">${b.f[c].toExponential(4)}</td>` +
+      `<td class="num">${Math.abs(a.f[c] - b.f[c]).toExponential(2)}</td></tr>`).join('') +
+    '</table>');
+  const ondeTxt = (p) => p ? `(${p[0]}, ${p[1]}, ${p[2]})` : '—';
+  linha('|u| máx no domínio', `<span class="num">${refU.toFixed(5)}</span>`);
+  linha('maior diferença em u', `<span class="num">${difU.toExponential(2)}</span> ` +
+    `<span style="color:#7b8496">(${(100 * difU / Math.max(refU, 1e-12)).toFixed(3)}% do máximo, ` +
+    `em ${ondeTxt(ondeU)}${ondeU && noContorno(...ondeU) ? ' — plano de contorno' : ''})</span>`);
+  linha('maior diferença ONDE SÃO COMPARÁVEIS',
+    `<span class="num">${difInterior.toExponential(2)}</span> ` +
+    `<span style="color:#7b8496">(${(100 * difInterior / Math.max(refU, 1e-12)).toFixed(4)}% ` +
+    `do máximo, em ${ondeTxt(ondeInterior)})</span>`);
+  linha('células acima de 1e-5 na região comparável',
+    `<span class="num">${acimaDeTol}</span>`);
+  linha('maior diferença em delta', `<span class="num">${difD.toExponential(2)}</span>`);
+
+  /*
+   * A tolerância é relativa e generosa por um motivo específico: os dois
+   * backends somam as mesmas parcelas em fp32 em ORDENS diferentes — a redução
+   * das forças é em árvore aqui e por fatias no WebGPU, e o compilador de cada
+   * driver reassocia as expressões como quiser. Diferença na quinta casa é
+   * aritmética; diferença no primeiro dígito é bug.
+   */
+  veredito('campo de velocidade concorda onde as definições coincidem',
+    difInterior < 1e-4 * Math.max(refU, 1e-6),
+    'tolerância 0,01% do |u| máximo — fora do contorno e da esponja, onde os ' +
+    'dois amostram o mesmo instante do passo');
+  veredito('força concorda entre backends', difF < 1e-3 * Math.max(magF, 1e-9),
+    `tolerância 0,1% de |F| = ${magF.toExponential(3)}`);
+}
+
+/* ──────────────────────────────────────────────────────── 8. as fontes */
+
+h2('8 — código gerado');
 fonte('passo (o laço quente)', fontes.passo);
 fonte('inicialização', fontes.init);
 fonte('campo macroscópico', fontes.macros);
+fonte('forças por troca de momento', fontes.forcas);
+fonte('redução em pirâmide', fontes.reduzir);
 
 /* ─────────────────────────────────────────────────────────── veredito */
 
@@ -199,9 +431,10 @@ h2('resumo');
 const ok = resultados.filter(r => r.passou).length;
 linha('testes', `<span class="${ok === resultados.length ? 'ok' : 'fail'}">` +
   `${ok}/${resultados.length}</span>`);
-push('<p style="color:#545c6b;max-width:70ch">Esta página verifica que o ' +
-  'emissor GLSL produz código que o driver aceita. A física do caminho WebGL2 ' +
-  'só passa a ser verificável quando o runtime existir — aí ' +
-  '<a href="validacao.html" style="color:#7fa9d8">validacao.html</a> roda nos ' +
-  'dois backends e os números têm de coincidir.</p>');
+push('<p style="color:#545c6b;max-width:70ch">O caminho WebGL2 resolve o ' +
+  'mesmo escoamento que o WebGPU: o campo concorda ao nível do arredondamento ' +
+  'de fp32 onde as duas definições coincidem, e a força sobre o corpo — que ' +
+  'sai das populações e não do campo amostrado — concorda no domínio inteiro. ' +
+  'Falta a camada de visualização, que hoje é WGSL: o app continua exigindo ' +
+  'WebGPU para <em>desenhar</em> mesmo com a física rodando aqui.</p>');
 </script>

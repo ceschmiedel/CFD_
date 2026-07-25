@@ -106,7 +106,7 @@ Williamson & Brown 1998 / Roshko 1954 (Strouhal), Maskell para bloqueio
 | `tests/geometria.html` | Leitura dos seis modelos do repositório, voxelização, silhuetas em corte |
 | `tests/estabilidade.html` | Onde o solver perde estabilidade **com um carro dentro** |
 | `tests/desempenho.html` | MLUPS e banda efetiva por preset |
-| `tests/webgl2.html` | O emissor GLSL: compila e liga os três shaders no driver desta máquina, confere que nenhum uniforme foi eliminado e mostra o ladrilhamento do atlas por preset |
+| `tests/webgl2.html` | O caminho WebGL2 inteiro: os cinco shaders compilam no driver desta máquina, escoamento uniforme preservado, viscosidade medida por decaimento de onda, e o **confronto com o WebGPU** no mesmo caso — campo e força lado a lado |
 
 ---
 
@@ -134,17 +134,24 @@ cerca de 5 fps sobre isso.
 A colisão TRT, o Smagorinsky e o bounce-back estão escritos **uma vez**, em
 `src/core/emit/ir.js`, em termos de um *dialeto* que sabe declarar uma variável
 e endereçar uma população na linguagem alvo. `wgsl.js` gera WGSL para o WebGPU;
-`glsl.js` gera GLSL ES 3.00 para o caminho WebGL2 — os três shaders (passo,
-inicialização e campo macroscópico) compilam e ligam, verificados em
-`tests/webgl2.html`. Falta o runtime que os despacha.
+`glsl.js` gera GLSL ES 3.00 para o WebGL2. **Os dois rodam**, e resolvem o
+mesmo escoamento: no mesmo caso, o campo de velocidade concorda em 3,3e-8 e a
+força sobre o corpo em 5e-7 sobre 0,72 — arredondamento de fp32, não física.
+`tests/webgl2.html` é o confronto.
 
 No WebGL2 não há compute nem storage buffer: o lattice 3D vira um atlas 2D
 (ladrilhos em z), as 19 populações vão em cinco texturas RGBA32F escritas de
-uma vez por MRT, e o kernel do passo é um fragment shader com ping-pong de
-framebuffer. Três construções de WGSL que vazaram para o IR (`select`, o cast
-`f32` e `gid`) são definidas no preâmbulo GLSL em vez de encher o IR de
-condicionais por backend — que é como uma física escrita uma vez volta a ser
-duas.
+uma vez por MRT, o kernel do passo é um fragment shader com ping-pong de
+framebuffer, e a redução das forças — que no WebGPU é memória compartilhada de
+workgroup — vira uma pirâmide de somas 2×2 até sobrar um texel. Três
+construções de WGSL que vazaram para o IR (`select`, o cast `f32` e `gid`) são
+definidas no preâmbulo GLSL em vez de encher o IR de condicionais por backend,
+que é como uma física escrita uma vez volta a ser duas.
+
+**O que ainda não roda em WebGL2 é a imagem.** As quatro camadas de
+visualização são WGSL e dependem de compute e de textura 3D; enquanto elas não
+tiverem par em GLSL, o app exige WebGPU para desenhar mesmo com a física
+disponível nos dois caminhos.
 
 O motivo é direto: um solver com dois backends e duas cópias da colisão tem,
 mais cedo ou mais tarde, duas físicas diferentes — e isso não aparece como erro

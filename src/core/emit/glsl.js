@@ -393,6 +393,108 @@ export function shaderMacros() {
 }
 
 /**
+ * Forças por TROCA DE MOMENTO, uma célula por fragmento.
+ *
+ * Para cada link que cruza a superfície — nó de fluido x_f com vizinho sólido
+ * x_f + c_i — a quantidade de movimento entregue à parede é
+ *
+ *     dF = c_i [ f_i(x_f) + f_ī(x_s) ]
+ *
+ * e com bounce-back no nó de fluido o que volta é o que saiu, então a soma é o
+ * dobro. ISTO INCLUI O ATRITO VISCOSO, que é a razão de o método ser este e
+ * não integração de pressão: não precisa de normal reconstruída de uma escada
+ * de voxels e entrega pressão e cisalhamento juntos.
+ *
+ * O termo `2 w_i c_i` das populações deslocadas NÃO cancela — ele só
+ * cancelaria somado sobre o par oposto inteiro, e um link é um só. Esquecê-lo
+ * dá um Cd plausível e errado por um fator constante, que sobrevive a qualquer
+ * inspeção visual.
+ *
+ * A soma dos fragmentos é feita depois, pela pirâmide de `shaderReduzir` — o
+ * WebGL2 não tem memória compartilhada de workgroup nem atômico de float.
+ */
+export function shaderForcas() {
+  const plano = planoDeTexturas();
+  const L = [];
+  L.push(...preambulo());
+  L.push('');
+  L.push('/* GERADO por src/core/emit/glsl.js */');
+  L.push('layout(location = 0) out vec4 oForca;');
+  L.push('');
+  L.push('void main() {');
+  L.push(...decodificarCelula());
+  L.push('');
+  L.push('  vec3 f = vec3(0.0);');
+  L.push(`  if (tipoEm(cell) == ${TIPO.FLUIDO}u) {`);
+  for (let i = 1; i < Q; i++) {          // i = 0 não cruza superfície nenhuma
+    const c = C[i];
+    const eixo = (d, n) => (d < 0 ? `${n}m` : d > 0 ? `${n}p` : `${n}0`);
+    const nb = `emAtlas(${eixo(c[0], 'x')}, ${eixo(c[1], 'y')}, ${eixo(c[2], 'z')})`;
+    const { textura, componente } = plano[i];
+    L.push('    {');
+    L.push(`      ivec2 nb = ${nb};`);
+    /* SÓ o corpo. O piso e as paredes do túnel refletem igual e não entram na
+     * conta — um piso contabilizado tem nx*ny células de superfície contra
+     * alguns milhares do corpo, e o que sai é o arrasto do CHÃO. */
+    L.push(`      if (tipoEm(nb) == ${TIPO.SOLIDO}u) {`);
+    L.push(`        float q = 2.0 * (texelFetch(uSrc${textura}, cell, 0)[${componente}]` +
+      ` + ${num(W[i])});`);
+    const termos = [];
+    for (let a = 0; a < 3; a++) {
+      if (c[a] === 0) { termos.push('0.0'); continue; }
+      termos.push(c[a] > 0 ? 'q' : '-q');
+    }
+    L.push(`        f += vec3(${termos.join(', ')});`);
+    L.push('      }');
+    L.push('    }');
+  }
+  L.push('  }');
+  L.push('  oForca = vec4(f, 0.0);');
+  L.push('}');
+  return L.join('\n');
+}
+
+/**
+ * Redução por soma: cada fragmento soma um bloco 2×2 da textura anterior.
+ *
+ * Aplicada repetidamente até sobrar um texel, que é lido com readPixels. São
+ * uns doze passes num atlas de 2560² — cada um com um quarto do trabalho do
+ * anterior, o que soma um terço a mais que o primeiro.
+ *
+ * Somar em ÁRVORE não é só o que a falta de atômico obriga: é também a melhor
+ * ordem numérica. Um acumulador único percorrendo um milhão de parcelas em
+ * fp32 acumula erro proporcional ao número de termos; a soma emparelhada
+ * acumula proporcional ao log dele.
+ *
+ * Os limites são testados explicitamente. Dimensão ímpar faz o último bloco
+ * cair meio fora, e `texelFetch` fora da textura é comportamento indefinido em
+ * GLSL ES — em alguns drivers devolve zero, em outros repete a borda, e aí a
+ * força ganha um viés que depende de quem fabricou a placa.
+ */
+export function shaderReduzir() {
+  return `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+
+uniform sampler2D uFonte;
+uniform ivec2 uTam;        // tamanho da textura de origem
+layout(location = 0) out vec4 oSoma;
+
+void main() {
+  ivec2 d = ivec2(gl_FragCoord.xy);
+  ivec2 b = d * 2;
+  vec4 s = texelFetch(uFonte, b, 0);
+  bool temX = b.x + 1 < uTam.x;
+  bool temY = b.y + 1 < uTam.y;
+  if (temX) { s += texelFetch(uFonte, ivec2(b.x + 1, b.y), 0); }
+  if (temY) { s += texelFetch(uFonte, ivec2(b.x, b.y + 1), 0); }
+  if (temX && temY) { s += texelFetch(uFonte, b + ivec2(1, 1), 0); }
+  oSoma = s;
+}`;
+}
+
+/**
  * Vertex shader comum: um triângulo que cobre o alvo inteiro.
  *
  * Triângulo e não quad — dois vértices ficam fora do viewport e não há costura

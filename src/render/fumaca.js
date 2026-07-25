@@ -61,7 +61,7 @@ const FUMO_STRUCT = `
 struct Fumo {
   rake:    vec4<f32>,   // x, passoY, passoZ, raio do filamento
   extensao: vec4<f32>,  // y0, y1, z0, z1 do pente, em células
-  params:  vec4<f32>,   // dt, dissipação, taxa, fase do pulso
+  params:  vec4<f32>,   // dt, dissipação, taxa, avanço deste passo (céls)
   luz:     vec4<f32>,   // direção (xyz normalizada), intensidade
 };
 @group(0) @binding(2) var<uniform> F: Fumo;`;
@@ -82,41 +82,53 @@ fn ehSolido(c: vec3<i32>) -> bool {
   return t == 1u || t == 4u || t == 7u;
 }
 
-/* O pente: filamentos alinhados numa grade (y, z) num plano a montante. */
+/*
+ * O pente: filamentos alinhados numa grade (y, z) num plano a montante.
+ *
+ * FILAMENTO CONTÍNUO, SEM PULSO. Houve aqui um termo que pulsava a emissão e
+ * produzia contas de fumaça viajando com o ar — a ideia era dar movimento a
+ * uma cena estacionária, e ela funciona, mas o preço é que o filamento deixa
+ * de ser uma LINHA. O que se vê passa a ser uma fileira de blocos, e a linha
+ * de corrente — que é a única coisa que esta camada existe para mostrar — fica
+ * picada. Um túnel de fumaça de verdade solta filete contínuo, e é assim que
+ * ele é lido. O movimento da cena vem das rasantes e do piso rolante, que
+ * fazem esse trabalho sem estragar o traçado.
+ */
 fn rake(p: vec3<f32>) -> f32 {
+  /*
+   * A ESPESSURA DA FATIA DE EMISSÃO ACOMPANHA O PASSO.
+   *
+   * O pente pinta uma fatia de espessura fixa no plano x do rake, e a fumaça
+   * só é pintada UMA VEZ por passo de advecção. Se a parcela anda mais que a
+   * fatia entre um passo e o outro, sobra buraco: o filamento sai como uma
+   * fileira de blocos separados pelo tanto que o escoamento andou. Era o que
+   * acontecia — e piorou quando o relógio passou a seguir a velocidade do
+   * túnel, porque a 50 m/s o passo passa de seis células contra os três da
+   * fatia.
+   *
+   * Fatia = 60% do avanço (params.w traz o avanço em células), com piso de 1,5
+   * para velocidade baixa. Aí a emissão de um passo sempre encosta na do
+   * seguinte e o filamento é contínuo em qualquer velocidade.
+   */
+  let meia = max(1.5, F.params.w * 0.6);
   let dx = abs(p.x - F.rake.x);
-  if (dx > 1.5) { return 0.0; }
+  if (dx > meia) { return 0.0; }
   if (p.y < F.extensao.x || p.y > F.extensao.y) { return 0.0; }
   if (p.z < F.extensao.z || p.z > F.extensao.w) { return 0.0; }
 
-  /* distância ao filamento mais próximo em cada eixo */
-  let fy = abs(fract(p.y / F.rake.y) - 0.5) * F.rake.y;
-  let fz = abs(fract(p.z / F.rake.z) - 0.5) * F.rake.z;
+  /* Distância ao filamento mais próximo em cada eixo. A fase é medida A PARTIR
+   * DA BORDA do pente, não da origem do domínio: é isso que faz o número de
+   * filamentos ser exatamente o pedido, em vez de "o que couber com a fase que
+   * calhar" — com o fract sobre p.y cru, mover o pente meio passo trocava o
+   * número de colunas visíveis sem ninguém pedir. */
+  let fy = abs(fract((p.y - F.extensao.x) / F.rake.y) - 0.5) * F.rake.y;
+  let fz = abs(fract((p.z - F.extensao.z) / F.rake.z) - 0.5) * F.rake.z;
   let r = length(vec2<f32>(fy, fz)) / max(F.rake.w, 1e-3);
 
-  /*
-   * PULSO.
-   *
-   * Um filamento contínuo em escoamento estacionário é uma linha PARADA — e
-   * isso não é defeito, é o que uma streakline é. Num túnel real a fumaça
-   * contínua também parece imóvel; o que se vê mexer é a esteira, onde o
-   * escoamento não é estacionário. O relato de "a fumaça não parece estar se
-   * movendo" é exatamente isso.
-   *
-   * A solução que os túneis físicos usam é pulsar a fumaça, e ela dá de graça
-   * uma segunda informação: as contas de fumaça viajam com o ar, então o
-   * ESPAÇAMENTO entre elas é proporcional à velocidade local. Onde o ar
-   * acelera, as contas se afastam; onde ele estagna, elas se acumulam. É
-   * medição por tempo de voo, não enfeite.
-   *
-   * O termo de base mantém o filamento contínuo por baixo das contas, senão o
-   * traçado do escoamento se perde entre um pulso e o outro.
-   */
-  let ciclo = fract(F.params.w);
-  let conta = exp(-pow((ciclo - 0.5) / 0.17, 2.0));
-  let intensidade = F.params.z * (0.3 + 1.5 * conta);
-
-  return intensidade * exp(-r * r * 5.5) * (1.0 - dx / 1.5);
+  /* O decaimento ao longo de x é suave para a emenda entre duas emissões não
+   * aparecer como degrau, mas não vai a zero na borda: um filamento que some
+   * na emenda é o mesmo bloco de novo, com outro nome. */
+  return F.params.z * exp(-r * r * 5.5) * (1.0 - 0.35 * dx / meia);
 }
 
 fn dim3() -> vec3<f32> {
@@ -360,21 +372,29 @@ export class VolumeFumaca {
        * maior que o avanço real do solver de propósito: a 0,05 célula por
        * passo, a fumaça levaria minutos para atravessar a tela. O que se
        * preserva é a forma do campo, não a escala do tempo — e o painel mostra
-       * o tempo físico separado, para os dois não se confundirem. */
+       * o tempo físico separado, para os dois não se confundirem.
+       *
+       * O renderizador SOBRESCREVE isto a cada quadro com o relógio comum das
+       * camadas de movimento (ver desenhar() lá). Este valor é só o que vale
+       * até o primeiro quadro com escoamento configurado. */
       dt: 17,
       /* Deslocamento acumulado, em células, que dispara um passo de advecção.
        * Ver o comentário em avancar(): é o parâmetro que decide se os
        * filamentos sobrevivem ou viram névoa. */
       saltoCelulas: 2.2,
-      dissipacao: 0.997,
-      taxa: 1.3,
-      /* Passos de advecção entre uma conta de fumaça e a seguinte. Com salto
-       * de 2,2 células por passo, 11 dá contas a cada ~24 células — cerca de
-       * três quartos do comprimento do corpo, que é o espaçamento em que o
-       * olho consegue seguir uma conta individual sem confundi-la com a
-       * vizinha. */
-      periodoPulso: 11,
-      densidade: 48,
+      /* Por passo de advecção. A 0,997 um filamento perdia quase metade da
+       * densidade na travessia e chegava lavado no fundo da cena — o que se lia
+       * como "a fumaça está apagada" era, em boa parte, isto. */
+      dissipacao: 0.999,
+      /* Densidade injetada no núcleo do filamento. */
+      taxa: 2.4,
+      /* Quantos filamentos o pente solta. São os dois controles do painel: o
+       * pente não tem uma densidade abstrata, tem um número de tubos, e é assim
+       * que se fala dele num túnel de verdade. O espaçamento e a espessura de
+       * cada filamento saem daqui e da extensão do pente. */
+      colunas: 7,
+      linhas: 5,
+      densidade: 70,
       g: 0.45,
       passos: 96,
       passosLuz: 5,
@@ -527,13 +547,44 @@ export class VolumeFumaca {
       y1: Math.min(this.ny - 2, e.centro[1] + largura * 1.15),
       z0: 1,
       z1: Math.min(this.nz - 2, altura * 2.3),
-      /* O espaçamento tem de ser VÁRIAS vezes o raio do filamento, senão as
-       * caudas das gaussianas se tocam já na saída do pente e o que se vê é um
-       * cobertor cinza — que é a primeira coisa que apareceu aqui. */
-      passoY: Math.max(5, largura / 5.5),
-      passoZ: Math.max(4.5, altura / 4.5),
-      raio: 0.85,
     };
+    this._recalcularGrade();
+  }
+
+  /**
+   * Define quantos tubos o pente tem.
+   *
+   * @param {object} n
+   * @param {number} [n.colunas]  filamentos ao longo da largura
+   * @param {number} [n.linhas]   filamentos ao longo da altura
+   */
+  definirGrade({ colunas, linhas } = {}) {
+    if (colunas > 0) this.params.colunas = Math.round(colunas);
+    if (linhas > 0) this.params.linhas = Math.round(linhas);
+    this._recalcularGrade();
+  }
+
+  /**
+   * Espaçamento e espessura, derivados da contagem.
+   *
+   * O RAIO SAI DO ESPAÇAMENTO, e não é um número solto. Ele era fixo em 0,85
+   * célula, escolhido quando o pente tinha vinte e poucos filamentos finos:
+   * com sete tubos num pente da mesma largura, o mesmo raio deixa cada
+   * filamento com um fio de espessura e vãos enormes entre eles — muito pouca
+   * fumaça na frente do carro, que é a queixa de "está apagada". Amarrando o
+   * raio ao passo, tirar filamentos os deixa mais GROSSOS, que é o que um
+   * pente com menos tubos e a mesma vazão faz.
+   *
+   * O teto de 0,3 do passo não é estético: as gaussianas vizinhas precisam
+   * estar mortas na metade do caminho entre dois filamentos (aqui, e^-4,9), ou
+   * as caudas se somam e o pente sopra um cobertor cinza em vez de filetes.
+   */
+  _recalcularGrade() {
+    const r = this.rake;
+    if (!r) return;
+    r.passoY = (r.y1 - r.y0) / Math.max(this.params.colunas, 1);
+    r.passoZ = (r.z1 - r.z0) / Math.max(this.params.linhas, 1);
+    r.raio = Math.min(2.8, Math.max(0.7, 0.3 * Math.min(r.passoY, r.passoZ)));
   }
 
   limpar() {
@@ -557,7 +608,10 @@ export class VolumeFumaca {
     const f = new Float32Array(buf);
     f.set([r.x, r.passoY, r.passoZ, r.raio], 0);
     f.set([r.y0, r.y1, r.z0, r.z1], 4);
-    f.set([dtEfetivo ?? p.dt, p.dissipacao, p.taxa, this._fase ?? 0], 8);
+    const dt = dtEfetivo ?? p.dt;
+    /* Avanço em células que este passo representa na corrente livre — é o que
+       dimensiona a fatia de emissão do pente. */
+    f.set([dt, p.dissipacao, p.taxa, dt * 0.05], 8);
     const l = p.luz, n = Math.hypot(...l) || 1;
     f.set([l[0] / n, l[1] / n, l[2] / n, p.intensidade], 12);
     this.device.queue.writeBuffer(this.uFumo, 0, buf);
@@ -594,7 +648,6 @@ export class VolumeFumaca {
 
     const dtEfetivo = this._acumulado;
     this._acumulado = 0;
-    this._fase = ((this._fase ?? 0) + 1 / Math.max(this.params.periodoPulso, 1)) % 1;
 
     this._escreverUniforme(dtEfetivo);
     const wg = [Math.ceil(this.nx / 4), Math.ceil(this.ny / 4), Math.ceil(this.nz / 4)];

@@ -113,10 +113,15 @@
 
   <h2>visualização</h2>
   <label class="chk"><input type="checkbox" id="oFumaca" checked autocomplete="off"> fumaça volumétrica</label>
-  <label>Densidade da fumaça <span class="val" id="vDens">48</span></label>
-  <input type="range" id="dens" min="8" max="130" step="2" value="48" autocomplete="off">
-  <label>Filamentos do rake <span class="val" id="vRake">normal</span></label>
-  <input type="range" id="rake" min="0.5" max="2.5" step="0.1" value="1" autocomplete="off">
+  <label>Densidade da fumaça <span class="val" id="vDens">70</span></label>
+  <input type="range" id="dens" min="10" max="240" step="2" value="70" autocomplete="off">
+  <label>Colunas de filamentos <span class="val" id="vColunas">7</span></label>
+  <input type="range" id="colunas" min="1" max="20" step="1" value="7" autocomplete="off">
+  <label>Linhas de filamentos <span class="val" id="vLinhas">5</span></label>
+  <input type="range" id="linhas" min="1" max="14" step="1" value="5" autocomplete="off">
+  <label class="chk"><input type="checkbox" id="oRasantes" checked autocomplete="off"> rasantes de solo</label>
+  <label>Intensidade das rasantes <span class="val" id="vRasa">1,0×</span></label>
+  <input type="range" id="rasa" min="0" max="2.5" step="0.1" value="1" autocomplete="off">
   <label class="chk"><input type="checkbox" id="oEsteiras" autocomplete="off"> esteiras de partículas</label>
   <label class="chk"><input type="checkbox" id="oCorpo" checked autocomplete="off"> carroceria</label>
   <label class="chk"><input type="checkbox" id="oCp" checked autocomplete="off"> pintar C<sub>p</sub> na superfície</label>
@@ -163,23 +168,90 @@ const $ = id => document.getElementById(id);
  * A única forma confiável é escrever os valores de volta depois do load.
  */
 const PADROES = {
-  comprimento: 4.7, velocidade: 30, guinada: 0, dens: 48, rake: 1, ganho: 1,
+  comprimento: 4.7, velocidade: 30, guinada: 0, dens: 70, ganho: 1,
+  colunas: 7, linhas: 5, rasa: 1,
   esteira: true, les: true, inverter: false,
-  oFumaca: true, oEsteiras: false, oCorpo: true, oCp: true,
+  oFumaca: true, oEsteiras: false, oCorpo: true, oCp: true, oRasantes: true,
 };
 function imporPadroes() {
   for (const [id, v] of Object.entries(PADROES)) {
     const el = $(id);
     if (!el) continue;
-    if (el.type === 'checkbox') el.checked = v; else el.value = v;
+    if (el.type === 'checkbox') { el.checked = v; continue; }
+    el.value = v;
+    /* Escrever `value` não dispara evento nenhum, então a etiqueta ao lado do
+       controle e o parâmetro que ele governa ficariam no que estivessem — foi
+       assim que o painel chegou a mostrar "48" com a fumaça em 130.
+       Só os deslizadores: o `change` dos checkboxes de escoamento remonta o
+       solver, e remontar a cada `pageshow` seria trocar um defeito por outro. */
+    el.dispatchEvent(new Event('input'));
   }
 }
 imporPadroes();
-/* De novo depois do `pageshow`: o Chrome restaura o estado do formulário
-   DEPOIS da execução do módulo, então escrever os padrões só uma vez perde a
-   corrida — foi o que deixou a velocidade voltar em 83 m/s. */
-addEventListener('pageshow', () => { imporPadroes(); aplicarEscoamento?.(); });
+/*
+ * De novo depois do `pageshow`, E DE NOVO DOIS QUADROS DEPOIS.
+ *
+ * O Chrome restaura o estado do formulário depois da execução do módulo, e em
+ * parte dos casos depois do próprio `pageshow` — escrever os padrões uma vez só
+ * perde a corrida. Pior: a restauração casa os controles POR POSIÇÃO, não por
+ * id. Acrescentar um controle no meio do painel desloca o mapa inteiro e os
+ * valores caem nos vizinhos errados, que é como a velocidade voltou em 8 m/s
+ * (o valor que era de outro deslizador) depois que as rasantes ganharam os
+ * dois controles delas. Uma segunda passada num quadro posterior pega o que
+ * escapou, e o custo é escrever meia dúzia de valores.
+ */
+/* Assim que o usuário encostar no painel, paramos de reescrever: o que ele
+   acabou de girar vale mais que o padrão. */
+let painelTocado = false;
+let padroesFixados = false;
+for (const ev of ['pointerdown', 'keydown', 'wheel']) {
+  addEventListener(ev, (e) => { if (e.isTrusted) painelTocado = true; }, true);
+}
+addEventListener('pageshow', () => {
+  /* Várias passadas curtas em vez de uma. O momento em que o Chrome escreve o
+     estado restaurado não é especificado e varia — medido aqui, ele já chegou
+     depois do pageshow, depois de dois quadros e depois do primeiro modelo
+     carregar. Reescrever meia dúzia de valores cinco vezes custa nada e é a
+     única forma que se manteve de pé. */
+  for (const ms of [0, 60, 250, 700, 1500, 3000, 5000]) {
+    setTimeout(() => {
+      if (painelTocado) return;
+      imporPadroes();
+      aplicarEscoamento?.();
+    }, ms);
+  }
+});
+/*
+ * E o que de fato fecha a porta: escrever os padrões ANTES de sair.
+ *
+ * O navegador tira a fotografia do formulário na saída da página. Correr atrás
+ * dela na volta é uma corrida que se perde de vez em quando — e cada vez que um
+ * controle novo entra no painel a restauração desalinha por posição e distribui
+ * os valores nos vizinhos errados. Se a fotografia já sai com os padrões
+ * dentro, não há o que restaurar de errado.
+ */
+addEventListener('pagehide', imporPadroes);
+
+/*
+ * Rolar o painel com o cursor sobre um deslizador NÃO pode mexer nele.
+ *
+ * O painel é mais alto que a tela e os deslizadores ocupam boa parte dele, então
+ * rolar até a seção de visualização passa o cursor por cima de meia dúzia de
+ * controles. Onde a roda mexe no range, o usuário chega embaixo com a
+ * velocidade em 51 m/s e a densidade no talo sem ter clicado em nada — e o pior
+ * é que ele não tem como saber que foi isso. Restaurar o valor no quadro
+ * seguinte, em vez de bloquear o evento, mantém a rolagem funcionando.
+ */
+for (const el of document.querySelectorAll('input[type=range]')) {
+  el.addEventListener('wheel', () => {
+    const antes = el.value;
+    requestAnimationFrame(() => { if (el.value !== antes) el.value = antes; });
+  }, { passive: true });
+}
 const fmt = (v, n = 3) => Number.isFinite(v) ? v.toFixed(n).replace('.', ',') : '—';
+
+/** Segundos de escoamento por segundo de tela. Ver aplicarEscoamento(). */
+const RELOGIO = 0.6;
 
 const MODELOS = [
   { id: 'tesla.glb', nome: 'Tesla (GLB)', comprimento: 4.7 },
@@ -383,8 +455,20 @@ async function _montar() {
   });
   app.renderer.definirMalha(prep.positions, prep.indices);
   app.renderer.enquadrar(prep.extentos, app.solver);
-  app.renderer.fumaca.rakeBase = { ...app.renderer.fumaca.rake };
-  $('rake').dispatchEvent(new Event('input'));
+  /* A restauração do navegador pode chegar DEPOIS da primeira montagem: o
+     <select> de modelo restaurado dispara `change`, e a montagem inteira roda
+     por baixo dela. Se ninguém tocou no painel até aqui, o que devia estar nos
+     controles ainda são os padrões. */
+  if (!painelTocado && !padroesFixados) { padroesFixados = true; imporPadroes(); }
+
+  /* Remontar cria fumaça e rasantes novas, com os padrões do construtor — os
+     controles são reaplicados por cima, senão mudar de modelo devolve em
+     silêncio os valores de fábrica. Disparar o evento e não escrever o
+     parâmetro direto: o mesmo handler escreve o valor E a etiqueta, então os
+     dois não têm como divergir. */
+  for (const id of ['colunas', 'linhas', 'dens', 'rasa']) {
+    $(id).dispatchEvent(new Event('input'));
+  }
 
   aplicarEscoamento();
 
@@ -427,6 +511,31 @@ function aplicarEscoamento(fator = null) {
     esponja: app.esponja,
     espessuraCL: esteira ? 0 : Math.round(preset.nz * 0.12),
   });
+
+  /* A grade do piso rola ao que o CINTO está fazendo — inclusive durante a
+     rampa, em que o fator ainda é fração de um. Com a esteira desligada o chão
+     é parado e a grade tem de ficar parada junto. */
+  app.renderer.opcoes.uCinto = esteira ? u.uLb * f : 0;
+
+  /*
+   * O relógio das camadas de movimento.
+   *
+   * u_lb é 0,05 em qualquer velocidade: o que os metros por segundo mudam é
+   * quanto tempo FÍSICO vale um passo de lattice (units.js: dt = u_lb·dx/U).
+   * Por isso animar a uma taxa fixa de células por quadro — que foi o que este
+   * app fazia — dá exatamente a mesma imagem a 5 e a 90 m/s, e o controle de
+   * velocidade não se sente em lugar nenhum da tela.
+   *
+   * A correção é declarar um RITMO DE REPRODUÇÃO em tempo físico e deixar a
+   * conversão fazer o resto: a 0,6 s de escoamento por segundo de tela o
+   * deslocamento na tela fica proporcional aos metros por segundo — medido
+   * aqui, 5 m/s dá 2 m/s de chão passando, 30 dá 12 e 90 dá 36. É câmera lenta
+   * de 1,7x: rápido o bastante para a cena ter urgência, lento o bastante para
+   * 90 m/s ainda ser algo que se acompanha em vez de um borrão. O HUD mostra o
+   * número, porque um vídeo em câmera lenta que não se anuncia é mais uma forma
+   * de mentir sobre a escala de tempo.
+   */
+  app.renderer.opcoes.passosPorSegundo = RELOGIO / u.dt;
 
   const v = $('veredito');
   v.textContent = u.verdict;
@@ -498,7 +607,8 @@ function laco() {
     $('hud').innerHTML =
       `<b>${app.fps.toFixed(0)}</b> fps · <b>${app.subpassos}</b> passo(s)/quadro<br>` +
       `passo <b>${app.solver.passos.toLocaleString('pt-BR')}</b> · ` +
-      `<b>${(tFis * 1000).toFixed(1)}</b> ms de tempo físico<br>` +
+      `<b>${(tFis * 1000).toFixed(1)}</b> ms de tempo físico · ` +
+      `imagem a <b>${RELOGIO.toFixed(1).replace('.', ',')}×</b> do tempo real<br>` +
       (app.solver.fatorRampa < 1
         ? `acelerando o túnel: <b>${(app.solver.fatorRampa * 100).toFixed(0)}%</b><br>` : '') +
       `travessias do domínio: <b>${(app.solver.passos / trav).toFixed(2)}</b>` +
@@ -540,26 +650,39 @@ for (const id of ['velocidade', 'comprimento', 'les']) {
 }
 $('oEsteiras').onchange = e => { app.renderer.opcoes.esteiras = e.target.checked; };
 $('oFumaca').onchange = e => { app.renderer.opcoes.fumaca = e.target.checked; };
+/* Os deslizadores de visualização são disparados por imporPadroes() no
+   `pageshow`, que pode chegar antes de haver renderizador ou volume montado —
+   daí os acessos opcionais. A etiqueta é escrita de qualquer forma: ela mostra
+   o que o controle diz, e o parâmetro é reaplicado quando a montagem termina. */
 $('dens').oninput = e => {
-  app.renderer.fumaca.params.densidade = +e.target.value;
+  const f = app.renderer?.fumaca;
+  if (f) f.params.densidade = +e.target.value;
   $('vDens').textContent = e.target.value;
 };
-$('rake').oninput = e => {
-  /* Mais filamentos = pente mais fino. Poucos e grossos leem melhor num carro
-     inteiro; muitos e finos mostram detalhe onde o escoamento é organizado. */
+/* Quantos tubos o pente tem. Menos filamentos saem mais grossos (o raio é
+   derivado do espaçamento, ver _recalcularGrade): poucos e gordos leem o carro
+   inteiro, muitos e finos mostram detalhe onde o escoamento é organizado. */
+$('colunas').oninput = e => {
+  const n = +e.target.value;
+  app.renderer?.fumaca?.definirGrade({ colunas: n });
+  $('vColunas').textContent = n;
+};
+$('linhas').oninput = e => {
+  const n = +e.target.value;
+  app.renderer?.fumaca?.definirGrade({ linhas: n });
+  $('vLinhas').textContent = n;
+};
+$('oRasantes').onchange = e => { app.renderer.opcoes.rasantes = e.target.checked; };
+$('rasa').oninput = e => {
   const k = +e.target.value;
-  const f = app.renderer.fumaca;
-  if (f.rakeBase) {
-    f.rake.passoY = f.rakeBase.passoY / k;
-    f.rake.passoZ = f.rakeBase.passoZ / k;
-    f.rake.raio = f.rakeBase.raio / Math.sqrt(k);
-  }
-  $('vRake').textContent = k < 0.8 ? 'esparso' : (k > 1.5 ? 'denso' : 'normal');
+  const r = app.renderer?.rasantes;
+  if (r) r.params.intensidade = k;
+  $('vRasa').textContent = k.toFixed(1).replace('.', ',') + '×';
 };
 $('oCorpo').onchange = e => { app.renderer.opcoes.corpo = e.target.checked; };
 $('oCp').onchange = e => { app.renderer.opcoes.cp = e.target.checked; };
 $('ganho').oninput = e => {
-  app.renderer.opcoes.ganhoCp = +e.target.value;
+  if (app.renderer) app.renderer.opcoes.ganhoCp = +e.target.value;
   $('vGanho').textContent = (+e.target.value).toFixed(1).replace('.', ',') + '×';
 };
 

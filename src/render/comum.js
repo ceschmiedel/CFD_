@@ -25,7 +25,7 @@ fn turbo(t0: f32) -> vec3<f32> {
 }`;
 
 /** Bytes do uniforme Cena. Mantenha em sincronia com o struct abaixo. */
-export const CENA_BYTES = 64 + 64 + 16 * 5;
+export const CENA_BYTES = 64 + 64 + 16 * 6;
 
 export const CENA = `
 struct Cena {
@@ -33,9 +33,15 @@ struct Cena {
   invViewProj: mat4x4<f32>,
   dim: vec4<u32>,          // nx, ny, nz, _
   escala: vec4<f32>,       // 1/nx, 1/ny, 1/nz, uRef
-  opcoes: vec4<f32>,       // modoCor, ganhoCp, quadro, _
+  opcoes: vec4<f32>,       // modoCor, ganhoCp, quadro, deslocamento do piso
   olho: vec4<f32>,         // posição da câmera em mundo
   fumaca: vec4<f32>,       // densidade, anisotropia g, passos, passosLuz
+  /* O relógio comum das camadas de movimento: quantos passos de lattice este
+   * quadro vale, e em quantos subpassos dividi-lo. Sai do tempo de parede
+   * multiplicado pelo ritmo de reprodução — ver desenhar() no renderizador.
+   * Está no uniforme da CENA, e não no de cada camada, porque duas camadas com
+   * relógios diferentes são duas velocidades na mesma imagem. */
+  relogio: vec4<f32>,      // dt do quadro, subpassos, _, _
 };
 @group(0) @binding(0) var<uniform> C: Cena;
 @group(0) @binding(1) var<storage, read> macros: array<vec4<f32>>;

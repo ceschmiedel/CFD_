@@ -4,7 +4,8 @@ Túnel de vento virtual que roda inteiramente na GPU do navegador. Carregue um
 modelo 3D (STL, OBJ, PLY, GLB), e ele é voxelizado dentro de um domínio de
 túnel e resolvido por um **Lattice-Boltzmann D3Q19** com colisão TRT e modelo
 sub-grid de Smagorinsky. Fumaça volumétrica advectada pelo campo, C<sub>p</sub>
-pintado na carroceria, forças por troca de momento.
+pintado na carroceria, traços de ar rasgando o chão e forças por troca de
+momento.
 
 Sem servidor de simulação, sem instalação: o solver é WebGPU compute, e o que o
 visitante abre roda na placa dele.
@@ -164,6 +165,27 @@ e limitador — sem ela os filamentos se dissolvem antes de alcançar o corpo. O
 rake é pulsado: o espaçamento entre as contas de fumaça é proporcional à
 velocidade local, o que é medição por tempo de voo.
 
+**Velocidade se lê no chão.** Um túnel em regime estacionário é uma cena parada
+— o campo não muda, as streaklines ficam onde estão, e quem chega sem contexto
+vê um carro de enfeite numa caixa. A sensação de 30 m/s vem de onde ela vem na
+janela de um carro: do solo borrando. Um punhado de traços rasantes advectados
+pelo campo, enviesados para o chão, mais compridos onde o ar corre e curtos e
+embolados na esteira; e a grade do piso rolando à velocidade do cinto, que é o
+que a condição de contorno da esteira rolante diz que o chão está fazendo. A
+direção e a velocidade são do campo resolvido — o exagero é o comprimento do
+traço, e ele estica ao longo do caminho que a partícula de fato percorreu.
+
+**Um relógio só, e ele é tempo físico.** `u_lb` vale 0,05 a 5 m/s e a 90: mudar
+a velocidade não mexe no campo de lattice, mexe em quanto tempo **físico** vale
+um passo. Animar a uma taxa fixa de células por quadro — o caminho óbvio — dá
+portanto a mesma imagem nas duas pontas do controle, e a velocidade do túnel não
+se sente em lugar nenhum da tela. As camadas de movimento (rasantes, esteiras,
+fumaça e a grade do piso) penduram todas num único relógio que reproduz tempo
+físico a ritmo constante: 0,6 s de escoamento por segundo de tela, medido contra
+o relógio de parede e não contado em quadros. O deslocamento na imagem fica
+proporcional aos metros por segundo, e o HUD anuncia o fator — câmera lenta que
+não se declara é mais uma forma de mentir sobre a escala de tempo.
+
 ### Honestidade sobre Reynolds
 
 Um carro de 4,5 m a 30 m/s está em Re = 9,0 × 10⁶. Resolver isso diretamente
@@ -196,8 +218,9 @@ src/
     voxel.js                  casca por eixo separador + inundação selada
     prepare.js                orientação, unidade, sentido, colocação
   render/
-    renderer.js               carroceria com Cp, esteiras, piso
+    renderer.js               carroceria com Cp, esteiras, piso rolante
     fumaca.js                 volume, advecção MacCormack, ray-march
+    rasante.js                traços rente ao chão, a velocidade da cena
     comum.js, mat4.js
 tests/                        as suítes de verificação (abra no navegador)
 tools/servidor.py             servidor de desenvolvimento sem cache

@@ -29,12 +29,21 @@
  * nasce".
  *
  * PISO. Uma grade, para a esteira rolante ter contra o que ser lida. Sem
- * referência de chão a cena flutua e o olho perde a escala.
+ * referência de chão a cena flutua e o olho perde a escala. Com a esteira
+ * ligada a grade ROLA, à velocidade do cinto — não é enfeite: é o que a
+ * condição de contorno diz que o chão está fazendo, e um piso desenhado parado
+ * embaixo de um cinto que se move é a imagem contando outra coisa que a
+ * simulação.
+ *
+ * RASANTES. Traços rente ao chão, para a cena ter velocidade. Ver rasante.js:
+ * é o que falta para um túnel estacionário não parecer um carro de enfeite
+ * dentro de uma caixa.
  */
 
 import { Orbita, inversa } from './mat4.js';
 import { CENA, TURBO, CENA_BYTES } from './comum.js';
 import { VolumeFumaca } from './fumaca.js';
+import { Rasantes } from './rasante.js';
 
 /* ───────────────────────────────────────────────────────────────── esteiras */
 
@@ -67,12 +76,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   // O que se preserva é a FORMA do campo, não a escala do tempo — e a tela
   // mostra o tempo físico separadamente, para ninguém confundir os dois.
   //
+  // O passo vem do relógio comum (C.relogio), o mesmo das rasantes, da fumaça
+  // e do piso: ele reproduz tempo físico a ritmo constante, o que faz o
+  // deslocamento na tela seguir os metros por segundo do controle. Um dt fixo
+  // aqui — que era o que havia — deixava esta camada andando igual a 5 e a
+  // 90 m/s enquanto o resto da cena acelerava.
+  //
   // Euler com passo grande erra a trajetória em curva fechada, então o passo é
   // subdividido: mesmo comprimento de traço, caminho muito mais fiel em volta
   // dos cantos, que é justamente onde o olho procura a separação.
-  let dt = 15.0;
+  let nSub = max(u32(C.relogio.y), 1u);
+  let dt = C.relogio.x / f32(nSub);
   var np = p.xyz;
-  for (var k = 0; k < 3; k = k + 1) {
+  for (var k = 0u; k < nSub; k = k + 1u) {
     np = np + amostrar(np).xyz * dt;
   }
 
@@ -209,7 +225,12 @@ fn vs(@builtin(vertex_index) vi: u32) -> Saida {
 @fragment
 fn fs(e: Saida) -> @location(0) vec4<f32> {
   let g = vec2<f32>(f32(C.dim.x), f32(C.dim.y)) / 16.0;
-  let l = abs(fract(e.uv * g) - 0.5) / fwidth(e.uv * g);
+  /* A grade rola com o cinto. O deslocamento chega em células e a grade se
+   * repete a cada 16 delas, então o renderizador o mantém dentro de um período
+   * — em float32, um acumulado de milhares de células perderia a fração e a
+   * grade começaria a andar aos trancos. */
+  let uv = vec2<f32>(e.uv.x - C.opcoes.w / f32(C.dim.x), e.uv.y);
+  let l = abs(fract(uv * g) - 0.5) / fwidth(uv * g);
   let linha = 1.0 - min(min(l.x, l.y), 1.0);
   return vec4<f32>(vec3<f32>(0.16, 0.19, 0.24) + linha * 0.10, 0.55 + linha * 0.25);
 }`;
@@ -225,9 +246,17 @@ export class Renderer {
     this.formato = navigator.gpu.getPreferredCanvasFormat();
     this.ctx.configure({ device, format: this.formato, alphaMode: 'opaque' });
     this.camera = new Orbita({ alvo: [0, 0, 0.35], distancia: 2.6 });
-    this.opcoes = { cp: true, ganhoCp: 1.0, esteiras: false, corpo: true, fumaca: true };
+    this.opcoes = {
+      cp: true, ganhoCp: 1.0, esteiras: false, corpo: true, fumaca: true,
+      rasantes: true,
+      /* Velocidade do cinto em unidades de lattice, escrita pelo app a cada
+       * ajuste de escoamento. Zero com a esteira desligada — e aí a grade do
+       * piso fica parada, que é o que um chão fixo faz. */
+      uCinto: 0,
+    };
     this.nParticulas = 0;
     this.quadro = 0;
+    this.deslocPiso = 0;
     this._ligarInteracao();
   }
 
@@ -356,6 +385,14 @@ export class Renderer {
     this.fumaca?.destruir();
     this.fumaca = new VolumeFumaca(d, solver);
     await this.fumaca.preparar(this.uCena, this.formato);
+    this.rasantes?.destruir();
+    /* Poucos, e menos ainda em domínio pequeno: a faixa é uma DENSIDADE por
+     * área de chão, e a mesma contagem que num túnel de 320 células fecha num
+     * de 160. */
+    this.rasantes = new Rasantes(d, solver, {
+      n: solver.nx >= 280 ? 2000 : 1200,
+    });
+    await this.rasantes.preparar(this.uCena, this.formato);
     this.depth = null;            // força recriação e religação da profundidade
 
     this.grupoCorpo = d.createBindGroup({
@@ -387,6 +424,7 @@ export class Renderer {
     const diag = Math.hypot(...extentos.tamanho) * k;
     this.camera.distancia = Math.max(0.5, diag * 1.9);
     this.fumaca?.posicionarRake(extentos);
+    this.rasantes?.posicionarFaixa(extentos);
   }
 
   /** Sobe a malha do corpo (posições no espaço do lattice). */
@@ -437,17 +475,61 @@ export class Renderer {
 
     const vp = this.camera.matriz(this.canvas.width / this.canvas.height);
     const f = this.fumaca;
+
+    /*
+     * ─── O RELÓGIO
+     *
+     * Uma taxa só, e todas as camadas de movimento penduradas nela: as
+     * rasantes, a fumaça e a grade do piso. Duas taxas seriam duas velocidades
+     * na mesma imagem, e o olho pega isso na hora — a faixa de ar deslizando
+     * sobre um asfalto que anda em outro ritmo é exatamente o que a esteira
+     * rolante existe para não acontecer.
+     *
+     * A taxa é uma FRAÇÃO DO TEMPO REAL, e é isso que faz o controle de
+     * velocidade ser sentido. u_lb vale 0,05 a 5 m/s e a 90 m/s — mudar os
+     * metros por segundo não mexe no campo de lattice, mexe em quanto tempo
+     * FÍSICO vale um passo (units.js: dt = u_lb·dx/U). Uma taxa fixa em células
+     * por quadro, que foi a primeira tentativa, produz portanto a mesma imagem
+     * nas duas pontas do controle — o túnel a 90 m/s parecia idêntico ao de 5.
+     * Reproduzir tempo físico a ritmo constante põe o deslocamento na tela
+     * proporcional aos metros por segundo, que é o que se quer sentir.
+     *
+     * `passosPorSegundo` é escrito pelo app a partir de units (ver RELOGIO no
+     * index) e vale zero até haver escoamento configurado.
+     *
+     * O passo é medido em tempo de PARADE e não contado em quadros: a 144 Hz um
+     * incremento por quadro andaria duas vezes mais rápido que a 72, e a mesma
+     * corrida pareceria ter velocidades diferentes em máquinas diferentes. O
+     * grampo cobre o outro extremo — depois de uma pausa longa do navegador, um
+     * salto de meio segundo teleportaria as partículas para o meio do carro.
+     */
+    const agora = performance.now();
+    const dtParede = Math.min(
+      Math.max((agora - (this._ultimoQuadro ?? agora)) / 1000, 1 / 240), 1 / 24);
+    this._ultimoQuadro = agora;
+
+    const dtVisual = (this.opcoes.passosPorSegundo ?? 0) * dtParede;
+    /* Subpassos para o pedaço de Euler ficar perto de uma célula e meia, custe
+     * o túnel 5 m/s ou 90 — abaixo disso não se ganha nada e acima o traço
+     * corta as curvas pela corda. */
+    const celulas = dtVisual * uRef;
+    const subpassos = Math.max(1, Math.min(8, Math.ceil(celulas / 1.5)));
+
+    this.deslocPiso = (this.deslocPiso + (this.opcoes.uCinto ?? 0) * dtVisual) % 16;
+
     const buf = new ArrayBuffer(CENA_BYTES);
     new Float32Array(buf, 0, 16).set(vp);
     new Float32Array(buf, 64, 16).set(inversa(vp));
     new Uint32Array(buf, 128, 4).set([s.nx, s.ny, s.nz, 0]);
     new Float32Array(buf, 144, 4).set([1/s.nx, 1/s.ny, 1/s.nz, uRef]);
     new Float32Array(buf, 160, 4).set([
-      this.opcoes.cp ? 1 : 0, this.opcoes.ganhoCp, this.quadro % 4096, 0]);
+      this.opcoes.cp ? 1 : 0, this.opcoes.ganhoCp, this.quadro % 4096,
+      this.deslocPiso]);
     new Float32Array(buf, 176, 4).set([...this.camera.olho, 1]);
     new Float32Array(buf, 192, 4).set(f
       ? [f.params.densidade, f.params.g, f.params.passos, f.params.passosLuz]
       : [0, 0, 1, 1]);
+    new Float32Array(buf, 208, 4).set([dtVisual, subpassos, 0, 0]);
     d.queue.writeBuffer(this.uCena, 0, buf);
 
     const enc = d.createCommandEncoder();
@@ -459,7 +541,23 @@ export class Renderer {
       cp.dispatchWorkgroups(Math.ceil(this.nParticulas / 64));
       cp.end();
     }
-    if (this.opcoes.fumaca && f) f.avancar(enc);
+    if (this.opcoes.rasantes && this.rasantes) {
+      /* Tamanho de um pixel em unidades de mundo a uma unidade da câmera:
+       * 2·tan(fov/2)/altura. É o que a fita precisa para não ficar sub-pixel
+       * ao longe, e só aqui se sabe o fov (mat4) e a altura do canvas. */
+      this.rasantes.avancar(enc, {
+        mundoPorPixel: 2 * Math.tan(0.85 / 2) / this.canvas.height,
+        distanciaCamera: this.camera.distancia,
+      });
+    }
+    if (this.opcoes.fumaca && f) {
+      /* A fumaça no mesmo relógio. Ela acumula e dispara passos grandes (ver
+       * avancar() lá), então o que muda aqui é só o tamanho do que ela
+       * acumula — e as contas do pulso passam a se afastar quando o túnel
+       * sopra mais forte, que é a leitura por tempo de voo que o rake promete. */
+      if (dtVisual > 0) f.params.dt = dtVisual;
+      f.avancar(enc);
+    }
 
     /*
      * DOIS PASSES. O opaco primeiro, escrevendo profundidade; a fumaça depois,
@@ -501,6 +599,9 @@ export class Renderer {
       rp.setBindGroup(0, this.grupo);
       rp.draw(2, this.nParticulas);
     }
+    /* Por último no passe opaco: são aditivas, e somar por cima do que já foi
+     * escrito é o resultado certo independente da ordem entre elas. */
+    if (this.opcoes.rasantes) this.rasantes?.desenhar(rp);
     rp.end();
 
     if (this.opcoes.fumaca && f) {

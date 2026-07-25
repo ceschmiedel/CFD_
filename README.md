@@ -173,8 +173,17 @@ carro. Com populações deslocadas, o termo `2·w_i·c_i` **não** cancela por l
 físico usa um pente de tubos finos soltando filamentos paralelos, e o que se vê
 é o que acontece com eles. Advecção semi-lagrangiana com correção de MacCormack
 e limitador — sem ela os filamentos se dissolvem antes de alcançar o corpo. O
-rake é pulsado: o espaçamento entre as contas de fumaça é proporcional à
-velocidade local, o que é medição por tempo de voo.
+pente é dito em número de tubos (colunas e linhas): a espessura de cada
+filamento sai do espaçamento, então tirar tubos os deixa mais grossos, que é o
+que um pente com menos saídas e a mesma vazão faz.
+
+E o filete é **contínuo**. Houve aqui uma emissão pulsada, que dava movimento a
+uma cena estacionária ao custo de picar o filamento em contas — e um filamento
+picado não mostra linha de corrente, que é a única coisa que essa camada existe
+para mostrar. O movimento veio para as rasantes e o piso. A fatia de emissão do
+pente acompanha o passo de advecção: fatia fixa com passo grande deixa buraco
+entre uma emissão e a seguinte, e o filamento sai como uma fileira de blocos —
+o que fica óbvio assim que o relógio passa a seguir a velocidade do túnel.
 
 **Velocidade se lê no chão.** Um túnel em regime estacionário é uma cena parada
 — o campo não muda, as streaklines ficam onde estão, e quem chega sem contexto

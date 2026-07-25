@@ -31,6 +31,35 @@ O servidor manda `Cache-Control: no-store`. Isso não é detalhe: com o
 cache, então uma correção de shader some sem aviso e você depura código que o
 navegador nunca carregou.
 
+## Publicar (Vercel)
+
+Site estático puro: **sem build, sem dependências, sem passo de instalação**. O
+repositório é o deploy.
+
+Na Vercel, *Add New → Project → Import* este repositório e deixe:
+
+| Campo | Valor |
+|---|---|
+| Framework Preset | **Other** |
+| Build Command | *(vazio)* |
+| Output Directory | *(vazio — serve a raiz)* |
+| Install Command | *(vazio)* |
+
+`vercel.json` já cuida dos cabeçalhos: `examples/` com cache imutável de um ano
+(são arquivos grandes que nunca mudam), `src/` com revalidação de uma hora.
+`.vercelignore` deixa de fora `legacy/`, `tools/` e um modelo de 28 MB que não
+está na lista do console — 40 % do peso do deploy por nada.
+
+Feita a importação, cada `git push` na `master` publica sozinho.
+
+> **Peso.** O modelo padrão tem 7,5 MB e todo visitante o baixa na primeira
+> visita — a tela de carregamento mostra o progresso em MB. O `DeLorean.STL`
+> tem 18 MB e só é baixado se escolhido.
+
+> **Quem abre sem WebGPU** vê uma explicação do porquê, não uma tela preta.
+> Chrome/Edge, Safari 18+ e Firefox 141+ têm; navegadores mais antigos e
+> algumas GPUs em lista de bloqueio, não.
+
 ---
 
 ## Validação

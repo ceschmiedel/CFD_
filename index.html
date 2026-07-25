@@ -260,6 +260,47 @@ selModelo.value = MODELOS[0].id;
 
 /* ────────────────────────────────────────────────────────────── montagem */
 
+/*
+ * Baixa mostrando o progresso.
+ *
+ * Num servidor local o modelo chega instantaneamente e um `await fetch` basta.
+ * Publicado, não: o modelo padrão tem 7,5 MB e é a primeira coisa que todo
+ * visitante baixa. Sem indicador, quem abre o link numa conexão comum vê uma
+ * tela parada dizendo "lendo" por vários segundos e conclui que travou.
+ *
+ * Se o servidor não mandar Content-Length (resposta comprimida em chunks, por
+ * exemplo), mostramos os bytes recebidos sem porcentagem — que ainda é
+ * infinitamente melhor que um número que não existe ou uma barra que mente.
+ */
+async function baixarComProgresso(url, nome) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${nome}: HTTP ${r.status}`);
+
+  const total = +r.headers.get('content-length') || 0;
+  if (!r.body) return r.arrayBuffer();
+
+  const leitor = r.body.getReader();
+  const partes = [];
+  let recebido = 0;
+  const mb = (b) => (b / 1048576).toFixed(1);
+
+  for (;;) {
+    const { done, value } = await leitor.read();
+    if (done) break;
+    partes.push(value);
+    recebido += value.length;
+    $('carregando').textContent = total
+      ? `baixando ${nome} — ${mb(recebido)} de ${mb(total)} MB ` +
+        `(${((recebido / total) * 100).toFixed(0)}%)`
+      : `baixando ${nome} — ${mb(recebido)} MB`;
+  }
+
+  const buf = new Uint8Array(recebido);
+  let o = 0;
+  for (const p of partes) { buf.set(p, o); o += p.length; }
+  return buf.buffer;
+}
+
 async function carregarModelo(fonte, nome) {
   $('carregando').style.display = 'grid';
   $('carregando').textContent = `lendo ${nome}…`;
@@ -267,7 +308,7 @@ async function carregarModelo(fonte, nome) {
 
   const buf = fonte instanceof ArrayBuffer
     ? fonte
-    : await (await fetch('examples/' + encodeURIComponent(fonte))).arrayBuffer();
+    : await baixarComProgresso('examples/' + encodeURIComponent(fonte), nome);
   app.malha = ler(buf, nome);
   await montar();
 }

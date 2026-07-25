@@ -1,0 +1,15 @@
+# O app Streamlit + FiPy anterior. Fica no repositório como registro, não tem
+# nada a fazer num deploy estático.
+legacy/
+
+# Modelo de 28 MB que não está na lista de modelos do console — ninguém o
+# baixaria, e ele sozinho é 40% do peso do deploy.
+examples/file-1688729511768.glb
+
+# Servidor de desenvolvimento: existe para desligar o cache durante a edição.
+# Em produção o cache é desejável e o próprio Vercel serve os arquivos.
+tools/
+
+.claude/
+__pycache__/
+*.pyc

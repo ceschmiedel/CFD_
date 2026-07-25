@@ -108,7 +108,12 @@
   <div id="veredito">—</div>
 
   <h2>visualização</h2>
-  <label class="chk"><input type="checkbox" id="oEsteiras" checked> esteiras de partículas</label>
+  <label class="chk"><input type="checkbox" id="oFumaca" checked> fumaça volumétrica</label>
+  <label>Densidade da fumaça <span class="val" id="vDens">48</span></label>
+  <input type="range" id="dens" min="8" max="130" step="2" value="48">
+  <label>Filamentos do rake <span class="val" id="vRake">normal</span></label>
+  <input type="range" id="rake" min="0.5" max="2.5" step="0.1" value="1">
+  <label class="chk"><input type="checkbox" id="oEsteiras"> esteiras de partículas</label>
   <label class="chk"><input type="checkbox" id="oCorpo" checked> carroceria</label>
   <label class="chk"><input type="checkbox" id="oCp" checked> pintar C<sub>p</sub> na superfície</label>
   <label>Ganho do C<sub>p</sub> <span class="val" id="vGanho">1,0×</span></label>
@@ -301,6 +306,8 @@ async function _montar() {
   });
   app.renderer.definirMalha(prep.positions, prep.indices);
   app.renderer.enquadrar(prep.extentos, app.solver);
+  app.renderer.fumaca.rakeBase = { ...app.renderer.fumaca.rake };
+  $('rake').dispatchEvent(new Event('input'));
 
   aplicarEscoamento();
 
@@ -455,6 +462,23 @@ for (const id of ['velocidade', 'comprimento', 'les']) {
   $(id).oninput = () => { aplicarEscoamento(); app.janCd.limpar(); app.janCl.limpar(); };
 }
 $('oEsteiras').onchange = e => { app.renderer.opcoes.esteiras = e.target.checked; };
+$('oFumaca').onchange = e => { app.renderer.opcoes.fumaca = e.target.checked; };
+$('dens').oninput = e => {
+  app.renderer.fumaca.params.densidade = +e.target.value;
+  $('vDens').textContent = e.target.value;
+};
+$('rake').oninput = e => {
+  /* Mais filamentos = pente mais fino. Poucos e grossos leem melhor num carro
+     inteiro; muitos e finos mostram detalhe onde o escoamento é organizado. */
+  const k = +e.target.value;
+  const f = app.renderer.fumaca;
+  if (f.rakeBase) {
+    f.rake.passoY = f.rakeBase.passoY / k;
+    f.rake.passoZ = f.rakeBase.passoZ / k;
+    f.rake.raio = f.rakeBase.raio / Math.sqrt(k);
+  }
+  $('vRake').textContent = k < 0.8 ? 'esparso' : (k > 1.5 ? 'denso' : 'normal');
+};
 $('oCorpo').onchange = e => { app.renderer.opcoes.corpo = e.target.checked; };
 $('oCp').onchange = e => { app.renderer.opcoes.cp = e.target.checked; };
 $('ganho').oninput = e => {

@@ -32,56 +32,9 @@
  * referência de chão a cena flutua e o olho perde a escala.
  */
 
-import { Orbita, identidade } from './mat4.js';
-
-/* Turbo (Mikhailov 2019), aproximação polinomial. Escolhido em vez de jet
- * porque jet tem bandas falsas — o olho vê contornos onde os dados são lisos —
- * e em vez de viridis porque num fundo escuro turbo tem mais faixa dinâmica
- * percebida, que é o que um campo de velocidade precisa. */
-const TURBO = `
-fn turbo(t0: f32) -> vec3<f32> {
-  let t = clamp(t0, 0.0, 1.0);
-  let r = 0.13572138 + t*(4.61539260 + t*(-42.66032258 + t*(132.13108234 + t*(-152.94239396 + t*59.28637943))));
-  let g = 0.09140261 + t*(2.19418839 + t*(4.84296658 + t*(-14.18503333 + t*(4.27729857 + t*2.82956604))));
-  let b = 0.10667330 + t*(12.64194608 + t*(-60.58204836 + t*(110.36276771 + t*(-89.90310912 + t*27.34824973))));
-  return clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(1.0));
-}`;
-
-/* Uniformes compartilhados por todos os passes de desenho. */
-const CENA = `
-struct Cena {
-  viewProj: mat4x4<f32>,
-  dim: vec4<u32>,          // nx, ny, nz, _
-  escala: vec4<f32>,       // 1/nx, 1/ny, 1/nz, uRef (velocidade de referência)
-  opcoes: vec4<f32>,       // modoCor, ganhoCp, _, _
-};
-@group(0) @binding(0) var<uniform> C: Cena;
-@group(0) @binding(1) var<storage, read> macros: array<vec4<f32>>;
-
-// Do espaço do lattice (célula) para o espaço de mundo, com a origem no centro
-// do piso — assim a órbita gira em torno do corpo e não do canto do domínio.
-//
-// UM ÚNICO FATOR PARA OS TRÊS EIXOS. A versão anterior dividia cada eixo pela
-// SUA dimensão (x/nx, y/ny, z/nz), o que mapeia o domínio para um cubo — e o
-// domínio não é cúbico. Num túnel 320x160x128, um carro de 32x15x10 células,
-// cuja proporção real é 1 : 0,47 : 0,31, era desenhado em 1 : 0,94 : 0,78:
-// duas vezes mais largo e duas vezes e meia mais alto do que é. O modelo
-// aparecia atarracado, e a impressão de "malha deformada" era inteiramente do
-// renderizador — a geometria que o solver usa sempre esteve com escala
-// uniforme.
-fn paraMundo(p: vec3<f32>) -> vec3<f32> {
-  let k = C.escala.x * 2.0;                 // escala.x = 1/nx, comum aos três
-  return vec3<f32>(
-    (p.x - f32(C.dim.x) * 0.5) * k,
-    (p.y - f32(C.dim.y) * 0.5) * k,
-    p.z * k);
-}
-
-fn amostrar(p: vec3<f32>) -> vec4<f32> {
-  let n = vec3<i32>(i32(C.dim.x), i32(C.dim.y), i32(C.dim.z));
-  let q = clamp(vec3<i32>(p), vec3<i32>(0), n - vec3<i32>(1));
-  return macros[u32(q.z) * C.dim.x * C.dim.y + u32(q.y) * C.dim.x + u32(q.x)];
-}`;
+import { Orbita, inversa } from './mat4.js';
+import { CENA, TURBO, CENA_BYTES } from './comum.js';
+import { VolumeFumaca } from './fumaca.js';
 
 /* ───────────────────────────────────────────────────────────────── esteiras */
 
@@ -263,7 +216,6 @@ fn fs(e: Saida) -> @location(0) vec4<f32> {
 
 /* ──────────────────────────────────────────────────────────────────── classe */
 
-const CENA_BYTES = 64 + 16 + 16 + 16;
 
 export class Renderer {
   constructor(device, canvas) {
@@ -273,7 +225,7 @@ export class Renderer {
     this.formato = navigator.gpu.getPreferredCanvasFormat();
     this.ctx.configure({ device, format: this.formato, alphaMode: 'opaque' });
     this.camera = new Orbita({ alvo: [0, 0, 0.35], distancia: 2.6 });
-    this.opcoes = { cp: true, ganhoCp: 1.0, esteiras: true, corpo: true };
+    this.opcoes = { cp: true, ganhoCp: 1.0, esteiras: false, corpo: true, fumaca: true };
     this.nParticulas = 0;
     this.quadro = 0;
     this._ligarInteracao();
@@ -401,6 +353,11 @@ export class Renderer {
     ];
     this.grupo = d.createBindGroup({ layout: this.layout, entries: entradas(this.bufParts) });
     this.grupoAdv = d.createBindGroup({ layout: this.layoutAdv, entries: entradas(this.bufParts) });
+    this.fumaca?.destruir();
+    this.fumaca = new VolumeFumaca(d, solver);
+    await this.fumaca.preparar(this.uCena, this.formato);
+    this.depth = null;            // força recriação e religação da profundidade
+
     this.grupoCorpo = d.createBindGroup({
       layout: this.layout,
       entries: [
@@ -429,6 +386,7 @@ export class Renderer {
     ];
     const diag = Math.hypot(...extentos.tamanho) * k;
     this.camera.distancia = Math.max(0.5, diag * 1.9);
+    this.fumaca?.posicionarRake(extentos);
   }
 
   /** Sobe a malha do corpo (posições no espaço do lattice). */
@@ -460,8 +418,14 @@ export class Renderer {
     this.canvas.width = w; this.canvas.height = h;
     this.depth?.destroy();
     this.depth = this.device.createTexture({
-      size: [w, h], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      size: [w, h], format: 'depth24plus',
+      /* TEXTURE_BINDING além de RENDER_ATTACHMENT: o ray-march da fumaça lê
+         esta profundidade para parar na geometria opaca. Sem isso a fumaça
+         atravessa o carro. */
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
+    this.vistaDepth = this.depth.createView();
+    this.fumaca?.ligarProfundidade(this.vistaDepth);
   }
 
   desenhar({ uRef }) {
@@ -471,12 +435,19 @@ export class Renderer {
     const d = this.device;
     this.quadro++;
 
+    const vp = this.camera.matriz(this.canvas.width / this.canvas.height);
+    const f = this.fumaca;
     const buf = new ArrayBuffer(CENA_BYTES);
-    new Float32Array(buf, 0, 16).set(this.camera.matriz(this.canvas.width / this.canvas.height));
-    new Uint32Array(buf, 64, 4).set([s.nx, s.ny, s.nz, 0]);
-    new Float32Array(buf, 80, 4).set([1/s.nx, 1/s.ny, 1/s.nz, uRef]);
-    new Float32Array(buf, 96, 4).set([
+    new Float32Array(buf, 0, 16).set(vp);
+    new Float32Array(buf, 64, 16).set(inversa(vp));
+    new Uint32Array(buf, 128, 4).set([s.nx, s.ny, s.nz, 0]);
+    new Float32Array(buf, 144, 4).set([1/s.nx, 1/s.ny, 1/s.nz, uRef]);
+    new Float32Array(buf, 160, 4).set([
       this.opcoes.cp ? 1 : 0, this.opcoes.ganhoCp, this.quadro % 4096, 0]);
+    new Float32Array(buf, 176, 4).set([...this.camera.olho, 1]);
+    new Float32Array(buf, 192, 4).set(f
+      ? [f.params.densidade, f.params.g, f.params.passos, f.params.passosLuz]
+      : [0, 0, 1, 1]);
     d.queue.writeBuffer(this.uCena, 0, buf);
 
     const enc = d.createCommandEncoder();
@@ -488,15 +459,27 @@ export class Renderer {
       cp.dispatchWorkgroups(Math.ceil(this.nParticulas / 64));
       cp.end();
     }
+    if (this.opcoes.fumaca && f) f.avancar(enc);
+
+    /*
+     * DOIS PASSES. O opaco primeiro, escrevendo profundidade; a fumaça depois,
+     * LENDO essa profundidade para saber onde parar.
+     *
+     * Não dá para fazer num passe só: um attachment de profundidade não pode
+     * ser alvo de render e textura amostrada ao mesmo tempo, e a fumaça precisa
+     * justamente da profundidade da geometria que acabou de ser desenhada para
+     * não atravessá-la.
+     */
+    const vista = this.ctx.getCurrentTexture().createView();
 
     const rp = enc.beginRenderPass({
       colorAttachments: [{
-        view: this.ctx.getCurrentTexture().createView(),
+        view: vista,
         clearValue: { r: 0.043, g: 0.051, b: 0.067, a: 1 },
         loadOp: 'clear', storeOp: 'store',
       }],
       depthStencilAttachment: {
-        view: this.depth.createView(),
+        view: this.vistaDepth,
         depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store',
       },
     });
@@ -518,8 +501,18 @@ export class Renderer {
       rp.setBindGroup(0, this.grupo);
       rp.draw(2, this.nParticulas);
     }
-
     rp.end();
+
+    if (this.opcoes.fumaca && f) {
+      const rf = enc.beginRenderPass({
+        colorAttachments: [{
+          view: vista, loadOp: 'load', storeOp: 'store',
+        }],
+      });
+      f.desenhar(rf);
+      rf.end();
+    }
+
     d.queue.submit([enc.finish()]);
   }
 }

@@ -32,6 +32,17 @@ O servidor manda `Cache-Control: no-store`. Isso não é detalhe: com o
 cache, então uma correção de shader some sem aviso e você depura código que o
 navegador nunca carregou.
 
+### No celular
+
+A interface se adapta: o painel de controle vira uma gaveta atrás do botão
+**⚙ controles**, a visualização fica com a tela inteira e o C<sub>d</sub> sobe
+para o canto superior, que está sempre à vista. Um dedo arrastando gira a
+câmera, dois dedos aproximam e afastam.
+
+A resolução inicial é escolhida mais baixa em telas pequenas — uma GPU móvel
+passa nos limites declarados de presets que ela não consegue avançar em tempo
+útil. As outras continuam na lista, com o tamanho de cada uma.
+
 ## Publicar (Vercel)
 
 Site estático puro: **sem build, sem dependências, sem passo de instalação**. O

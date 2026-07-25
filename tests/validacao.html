@@ -1,5 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CFD2026 — validação contra correlações</title>
 <style>
   body { font: 13px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace;
@@ -17,6 +18,15 @@
   .qualitativo { color: #e0af68; } .discordante, .indefinido { color: #f0616d; }
   .num { color: #94c8ff; }
   progress { width: 240px; height: 8px; }
+
+  /* Celular: sem meta viewport estas páginas abriam em 980px e o telefone
+     reduzia tudo a um décimo; e uma tabela larga precisa de rolagem PRÓPRIA,
+     senão ela alarga a página e o texto passa a rolar de lado junto. */
+  @media (max-width: 640px) {
+    body { padding: 16px 14px; }
+    table { display: block; max-width: 100%; overflow-x: auto; }
+    progress, canvas { max-width: 100%; }
+  }
 </style>
 <h1>CFD2026 — validação contra correlações</h1>
 <p class="nota">Cada caso roda o solver completo — voxelização, contornos de túnel, troca de momento —

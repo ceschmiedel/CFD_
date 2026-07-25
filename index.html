@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="pt-BR">
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>CFD2026 — túnel de vento</title>
 <style>
   :root {
@@ -11,15 +11,32 @@
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
+  /* dvh e não vh: no celular a barra de endereço entra e sai, e 100vh mede a
+     altura COM ela recolhida. O canvas ficava mais alto que a área visível e o
+     rodapé de estado nascia fora da tela. */
+  @supports (height: 100dvh) { html, body { height: 100dvh; } }
   body {
     background: var(--fundo); color: var(--texto); overflow: hidden;
+    overscroll-behavior: none;
     font: 12px/1.55 ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
     display: grid; grid-template-columns: 268px 1fr;
   }
   aside { background: var(--painel); border-right: 1px solid var(--borda);
           overflow-y: auto; padding: 14px 14px 40px; }
-  main { position: relative; }
-  canvas { width: 100%; height: 100%; display: block; }
+  main { position: relative; overflow: hidden; min-width: 0; }
+  /*
+   * position: absolute e não estático. Com `height: 100%` contra uma linha de
+   * grade automática a altura é indefinida, e aí o Chrome cai na proporção
+   * intrínseca do <canvas> (300x150, ou seja 2:1): num celular em paisagem de
+   * 844x390 isso dava um canvas de 844x422, a linha da grade crescia com ele e
+   * o rodapé de estado nascia 32px abaixo da tela. Posicionado, o canvas sai do
+   * cálculo de tamanho da linha e passa a preencher o <main> em vez de defini-lo.
+   *
+   * touch-action: none — sem isto, arrastar sobre a tela rola a página em vez de
+   * girar a câmera, e o gesto principal do app não existe no celular.
+   */
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%;
+           display: block; touch-action: none; }
 
   h1 { font-size: 12px; letter-spacing: .14em; text-transform: uppercase;
        color: var(--texto); margin: 0 0 2px; font-weight: 600; }
@@ -63,11 +80,135 @@
   #estado { position: absolute; bottom: 12px; left: 14px; color: var(--tenue);
             font-size: 10.5px; pointer-events: none; }
   #carregando { position: absolute; inset: 0; display: grid; place-items: center;
-                background: rgba(11,13,17,.9); color: var(--fraco); font-size: 12px; }
+                background: rgba(11,13,17,.9); color: var(--fraco); font-size: 12px;
+                padding: 24px; text-align: center; }
   a { color: #7fa9d8; }
+
+  /* Só existem no layout de celular; no desktop o painel é sempre visível. */
+  #alternar, #cortina, #fechar { display: none; }
+
+  /*
+   * CELULAR: o painel vira gaveta e o canvas fica com a tela inteira.
+   *
+   * A coluna fixa de 268px é razoável num monitor e absurda num telefone de
+   * 390px de largura: sobravam 122px para a visualização, que é o app todo.
+   * Com a gaveta fora do fluxo o canvas recebe a largura completa e os
+   * controles chegam por cima quando pedidos.
+   *
+   * A segunda condição pega o celular em paisagem — 844x390 passa folgado dos
+   * 760px de largura, mas 390px de altura não comportam nem o painel nem uma
+   * cena com proporção útil ao lado dele.
+   */
+  @media (max-width: 760px), (max-height: 480px) {
+    /* Uma medida só para a largura da gaveta: o botão de fechar se posiciona
+       pela borda dela, e dois valores que precisam concordar viram um bug no
+       dia em que alguém mexer em um deles. */
+    body { grid-template-columns: 1fr; --gaveta: min(88vw, 330px); }
+
+    aside {
+      position: fixed; z-index: 3; top: 0; bottom: 0; left: 0;
+      width: var(--gaveta);
+      padding: max(14px, env(safe-area-inset-top)) 14px
+               calc(40px + env(safe-area-inset-bottom))
+               max(14px, env(safe-area-inset-left));
+      transform: translateX(-100%);
+      /* visibility junto do transform: fora da tela o painel continuava na
+         ordem de tabulação e no leitor de tela, então o Tab sumia dentro de
+         controles invisíveis. A transição da visibilidade é o que mantém a
+         gaveta visível enquanto ela desliza para fora. */
+      visibility: hidden;
+      transition: transform .22s ease, visibility .22s;
+      /* contain: rolar até o fim da gaveta não arrasta a página atrás dela. */
+      overscroll-behavior: contain;
+      box-shadow: 0 0 40px rgba(0,0,0,.55);
+    }
+    body.painel-aberto aside { transform: none; visibility: visible; }
+
+    #cortina {
+      display: block; position: fixed; inset: 0; z-index: 2;
+      background: rgba(6,8,11,.55); opacity: 0; pointer-events: none;
+      transition: opacity .22s ease;
+    }
+    body.painel-aberto #cortina { opacity: 1; pointer-events: auto; }
+
+    /* Canto inferior direito: é onde o polegar chega sem trocar a mão de
+       posição, e a gaveta abre da esquerda, então o botão nunca fica embaixo
+       dela — continua alcançável para fechar. */
+    #alternar {
+      display: block; position: fixed; z-index: 4; width: auto;
+      right: max(12px, env(safe-area-inset-right));
+      bottom: max(12px, env(safe-area-inset-bottom));
+      padding: 11px 16px; border-radius: 999px;
+      background: #1b2734; border-color: #2c4055; color: #cfe6ff;
+      box-shadow: 0 6px 18px rgba(0,0,0,.45);
+    }
+    /* Com a gaveta aberta o botão flutuante cairia sobre o painel — a ponta
+       direita de um slider fica exatamente ali, e é o valor máximo dele. Quem
+       fecha passa a ser o ✕ na quina da própria gaveta. */
+    body.painel-aberto #alternar { display: none; }
+    /* 42px de lado, o mesmo mínimo dos outros botões no toque — o `min-height`
+       do bloco de ponteiro grosso venceria uma altura menor e deixaria o
+       círculo oval. */
+    body.painel-aberto #fechar {
+      display: block; position: fixed; z-index: 4;
+      left: calc(var(--gaveta) - 50px);
+      top: max(8px, env(safe-area-inset-top));
+      width: 42px; height: 42px; padding: 0; border-radius: 50%;
+      line-height: 1; color: var(--fraco);
+    }
+    /* Espaço para o ✕: sem isto ele pousa sobre o fim do subtítulo. */
+    aside h1, aside .sub { padding-right: 50px; }
+
+    #hud { top: max(10px, env(safe-area-inset-top)); font-size: 10px;
+           left: max(12px, env(safe-area-inset-left)); }
+    #estado { max-width: 58vw; bottom: max(14px, env(safe-area-inset-bottom));
+              left: max(12px, env(safe-area-inset-left)); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    aside, #cortina { transition: none; }
+  }
+
+  /*
+   * DEDO: 12px de fonte e um checkbox de 13px são alvos que um mouse acerta e
+   * um dedo não. Isto cresce o que é clicável sem mexer no layout — e vale por
+   * ponteiro grosso, não por largura de tela, porque um tablet grande com
+   * toque tem exatamente o mesmo problema.
+   */
+  @media (pointer: coarse) {
+    body { font-size: 12.5px; }
+    select, input[type=file], button { padding: 10px 11px; min-height: 42px; }
+    .chk { padding: 5px 0; }
+    .chk input { width: 18px; height: 18px; }
+    label { margin: 12px 0 4px; }
+
+    /* O thumb nativo do range é pequeno demais para o dedo e accent-color só
+       muda a cor — para mudar o tamanho tem de assumir a aparência. */
+    input[type=range] {
+      -webkit-appearance: none; appearance: none;
+      height: 28px; background: transparent; margin: 0;
+    }
+    input[type=range]::-webkit-slider-runnable-track {
+      height: 4px; border-radius: 2px; background: #263041;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 22px; height: 22px; margin-top: -9px; border-radius: 50%;
+      background: #4a7fb5; border: 1px solid #6f9fce;
+    }
+    input[type=range]::-moz-range-track {
+      height: 4px; border-radius: 2px; background: #263041;
+    }
+    input[type=range]::-moz-range-thumb {
+      width: 20px; height: 20px; border-radius: 50%;
+      background: #4a7fb5; border: 1px solid #6f9fce;
+    }
+    #veredito, .erro-barra, .sub { font-size: 11px; }
+    .medida { padding: 5px 0; }
+  }
 </style>
 
-<aside>
+<aside id="painel">
   <!-- autocomplete="off" em tudo: o navegador restaura valores de formulário
        ao recarregar, e num painel de controle isso significa que recarregar NÃO
        devolve os padrões. Aqui isso apareceu como a fumaça voltando com
@@ -136,6 +277,10 @@
     <a href="tests/desempenho.html" target="_blank">desempenho</a>
   </div>
 </aside>
+
+<div id="cortina"></div>
+<button id="alternar" type="button" aria-controls="painel" aria-expanded="false">⚙ controles</button>
+<button id="fechar" type="button" aria-controls="painel" aria-label="fechar os controles">✕</button>
 
 <main>
   <canvas id="tela"></canvas>
@@ -252,6 +397,33 @@ const fmt = (v, n = 3) => Number.isFinite(v) ? v.toFixed(n).replace('.', ',') : 
 
 /** Segundos de escoamento por segundo de tela. Ver aplicarEscoamento(). */
 const RELOGIO = 0.6;
+
+/* ─────────────────────────────────────────────────────── gaveta de controles */
+
+/*
+ * No celular o painel é uma gaveta, e ela começa FECHADA: quem abre o link quer
+ * ver o túnel, não uma lista de controles com uma faixa de canvas ao lado.
+ *
+ * Esta parte é ligada antes de qualquer coisa que possa falhar (a sonda de
+ * WebGPU aborta o módulo com um throw quando a GPU não serve). Num telefone sem
+ * WebGPU o botão continua abrindo o painel, que é onde estão os links das
+ * páginas de verificação — a alternativa era uma tela de erro com um botão
+ * morto no canto.
+ */
+const ehMovel = matchMedia('(max-width: 760px), (max-height: 480px)');
+const ehToque = matchMedia('(pointer: coarse)');
+
+function abrirPainel(v) {
+  document.body.classList.toggle('painel-aberto', v);
+  $('alternar').setAttribute('aria-expanded', String(v));
+}
+$('alternar').onclick = () => abrirPainel(true);
+$('fechar').onclick = () => abrirPainel(false);
+$('cortina').onclick = () => abrirPainel(false);
+addEventListener('keydown', e => { if (e.key === 'Escape') abrirPainel(false); });
+/* Voltar ao desktop com a gaveta aberta deixaria a classe pendurada e ela
+   reapareceria por cima do canvas no próximo estreitamento da janela. */
+ehMovel.addEventListener('change', e => { if (!e.matches) abrirPainel(false); });
 
 const MODELOS = [
   { id: 'tesla.glb', nome: 'Tesla (GLB)', comprimento: 4.7 },
@@ -604,7 +776,15 @@ function laco() {
    CORPO, que e uma referencia diferente e vinte vezes menor — rotular uma
    como a outra faz o painel anunciar convergencia que nao houve. */
   const trav = u ? Math.ceil(app.preset.nx / u.uLb) : 1;
-    $('hud').innerHTML =
+    /* No celular o painel de medidas está atrás da gaveta, e o Cd é o número
+       pelo qual a pessoa abriu o app — ele vai para o HUD, que está sempre à
+       vista. Aqui só isso muda; o resto do HUD é o mesmo dos dois lados. */
+    const cdHud = ehMovel.matches
+      ? `C<sub>d</sub> <b>${fmt(app.janCd.media)}</b>` +
+        (app.janCd.n >= 30 ? ` ± ${fmt(app.janCd.desvio, 2)}` : ' <span>acumulando…</span>') +
+        `<br>`
+      : '';
+    $('hud').innerHTML = cdHud +
       `<b>${app.fps.toFixed(0)}</b> fps · <b>${app.subpassos}</b> passo(s)/quadro<br>` +
       `passo <b>${app.solver.passos.toLocaleString('pt-BR')}</b> · ` +
       `<b>${(tFis * 1000).toFixed(1)}</b> ms de tempo físico · ` +
@@ -615,7 +795,9 @@ function laco() {
       (app.solver.passos / trav < 3
         ? ` <span style="color:var(--alerta)">— abaixo de 3, o Cd ainda é transiente</span>` : '');
     $('estado').textContent = app.rodando
-      ? 'arraste para girar · roda do mouse para aproximar'
+      ? (ehToque.matches
+          ? 'arraste para girar · pinça para aproximar'
+          : 'arraste para girar · roda do mouse para aproximar')
       : 'PAUSADO';
   }
 }
@@ -630,15 +812,21 @@ $('reiniciar').onclick = () => {
   app.solver?.inicializar();
   app.janCd.limpar(); app.janCl.limpar();
 };
-selPreset.onchange = () => montar();
+/* Fecha a gaveta no que remonta o domínio: a barra de progresso e o "voxelizando"
+   aparecem no meio do canvas, e no celular metade disso fica atrás do painel. */
+const recolher = () => { if (ehMovel.matches) abrirPainel(false); };
+selPreset.onchange = () => { recolher(); montar(); };
 selModelo.onchange = () => {
   const m = MODELOS.find(x => x.id === selModelo.value);
   $('comprimento').value = m.comprimento;
+  recolher();
   carregarModelo(m.id, m.id);
 };
 $('arquivo').onchange = async (e) => {
   const f = e.target.files?.[0];
-  if (f) await carregarModelo(await f.arrayBuffer(), f.name);
+  if (!f) return;
+  recolher();
+  await carregarModelo(await f.arrayBuffer(), f.name);
 };
 $('guinada').oninput = (e) => { $('vGuinada').textContent = `${e.target.value}°`; };
 $('guinada').onchange = () => montar();

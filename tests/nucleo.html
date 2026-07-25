@@ -1,5 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CFD2026 — verificação do núcleo LBM</title>
 <style>
   body { font: 13px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace;
@@ -19,6 +20,15 @@
         padding: 10px 12px; overflow: auto; max-height: 340px; color: #9aa3b2; }
   details { margin: 8px 0; }
   summary { cursor: pointer; color: #7b8496; }
+
+  /* Celular: sem meta viewport estas páginas abriam em 980px e o telefone
+     reduzia tudo a um décimo; e uma tabela larga precisa de rolagem PRÓPRIA,
+     senão ela alarga a página e o texto passa a rolar de lado junto. */
+  @media (max-width: 640px) {
+    body { padding: 16px 14px; }
+    table { display: block; max-width: 100%; overflow-x: auto; }
+    progress, canvas { max-width: 100%; }
+  }
 </style>
 <h1>CFD2026 — verificação do núcleo LBM</h1>
 <div id="saida">sondando…</div>

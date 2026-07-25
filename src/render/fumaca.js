@@ -61,7 +61,7 @@ const FUMO_STRUCT = `
 struct Fumo {
   rake:    vec4<f32>,   // x, passoY, passoZ, raio do filamento
   extensao: vec4<f32>,  // y0, y1, z0, z1 do pente, em células
-  params:  vec4<f32>,   // dt, dissipação, taxa, _
+  params:  vec4<f32>,   // dt, dissipação, taxa, fase do pulso
   luz:     vec4<f32>,   // direção (xyz normalizada), intensidade
 };
 @group(0) @binding(2) var<uniform> F: Fumo;`;
@@ -93,7 +93,30 @@ fn rake(p: vec3<f32>) -> f32 {
   let fy = abs(fract(p.y / F.rake.y) - 0.5) * F.rake.y;
   let fz = abs(fract(p.z / F.rake.z) - 0.5) * F.rake.z;
   let r = length(vec2<f32>(fy, fz)) / max(F.rake.w, 1e-3);
-  return F.params.z * exp(-r * r * 5.5) * (1.0 - dx / 1.5);
+
+  /*
+   * PULSO.
+   *
+   * Um filamento contínuo em escoamento estacionário é uma linha PARADA — e
+   * isso não é defeito, é o que uma streakline é. Num túnel real a fumaça
+   * contínua também parece imóvel; o que se vê mexer é a esteira, onde o
+   * escoamento não é estacionário. O relato de "a fumaça não parece estar se
+   * movendo" é exatamente isso.
+   *
+   * A solução que os túneis físicos usam é pulsar a fumaça, e ela dá de graça
+   * uma segunda informação: as contas de fumaça viajam com o ar, então o
+   * ESPAÇAMENTO entre elas é proporcional à velocidade local. Onde o ar
+   * acelera, as contas se afastam; onde ele estagna, elas se acumulam. É
+   * medição por tempo de voo, não enfeite.
+   *
+   * O termo de base mantém o filamento contínuo por baixo das contas, senão o
+   * traçado do escoamento se perde entre um pulso e o outro.
+   */
+  let ciclo = fract(F.params.w);
+  let conta = exp(-pow((ciclo - 0.5) / 0.17, 2.0));
+  let intensidade = F.params.z * (0.3 + 1.5 * conta);
+
+  return intensidade * exp(-r * r * 5.5) * (1.0 - dx / 1.5);
 }
 
 fn dim3() -> vec3<f32> {
@@ -203,8 +226,26 @@ fn vs(@builtin(vertex_index) vi: u32) -> Saida {
   return o;
 }
 
+/*
+ * Do NDC de volta para o mundo.
+ *
+ * SEM INVERTER Y. Havia um "-ndc.y" aqui, e ele é o bug que fazia a fumaça
+ * aparecer POR BAIXO do carro e girar junto com a câmera em vez de ficar
+ * parada no mundo.
+ *
+ * A confusão é fácil: em WebGPU o espaço de recorte tem y para CIMA, mas o
+ * "@builtin(position)" que chega ao fragmento tem y para BAIXO (coordenada de
+ * framebuffer). São dois espaços diferentes e cada um quer a sua convenção.
+ * "ndc" aqui é uma varying escrita pelo vértice em espaço de recorte — ela já
+ * chega com y para cima e não deve ser mexida. Quem precisa de y para baixo é
+ * o "textureLoad" da profundidade, e esse usa "e.pos.xy" diretamente.
+ *
+ * Espelhar y no raio primário produz exatamente o que foi relatado: a fumaça
+ * que deveria passar por cima do corpo é desenhada embaixo dele, e o volume
+ * inteiro parece preso à câmera porque o espelhamento acompanha a rotação.
+ */
 fn mundoDe(ndc: vec2<f32>, z: f32) -> vec3<f32> {
-  let h = C.invViewProj * vec4<f32>(ndc.x, -ndc.y, z, 1.0);
+  let h = C.invViewProj * vec4<f32>(ndc.x, ndc.y, z, 1.0);
   return h.xyz / h.w;
 }
 
@@ -327,6 +368,12 @@ export class VolumeFumaca {
       saltoCelulas: 2.2,
       dissipacao: 0.997,
       taxa: 1.3,
+      /* Passos de advecção entre uma conta de fumaça e a seguinte. Com salto
+       * de 2,2 células por passo, 11 dá contas a cada ~24 células — cerca de
+       * três quartos do comprimento do corpo, que é o espaçamento em que o
+       * olho consegue seguir uma conta individual sem confundi-la com a
+       * vizinha. */
+      periodoPulso: 11,
       densidade: 48,
       g: 0.45,
       passos: 96,
@@ -510,7 +557,7 @@ export class VolumeFumaca {
     const f = new Float32Array(buf);
     f.set([r.x, r.passoY, r.passoZ, r.raio], 0);
     f.set([r.y0, r.y1, r.z0, r.z1], 4);
-    f.set([dtEfetivo ?? p.dt, p.dissipacao, p.taxa, 0], 8);
+    f.set([dtEfetivo ?? p.dt, p.dissipacao, p.taxa, this._fase ?? 0], 8);
     const l = p.luz, n = Math.hypot(...l) || 1;
     f.set([l[0] / n, l[1] / n, l[2] / n, p.intensidade], 12);
     this.device.queue.writeBuffer(this.uFumo, 0, buf);
@@ -547,6 +594,7 @@ export class VolumeFumaca {
 
     const dtEfetivo = this._acumulado;
     this._acumulado = 0;
+    this._fase = ((this._fase ?? 0) + 1 / Math.max(this.params.periodoPulso, 1)) % 1;
 
     this._escreverUniforme(dtEfetivo);
     const wg = [Math.ceil(this.nx / 4), Math.ceil(this.ny / 4), Math.ceil(this.nz / 4)];

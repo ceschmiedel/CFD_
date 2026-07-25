@@ -68,35 +68,39 @@
 </style>
 
 <aside>
+  <!-- autocomplete="off" em tudo: o navegador restaura valores de formulário
+       ao recarregar, e num painel de controle isso significa que recarregar NÃO
+       devolve os padrões. Aqui isso apareceu como a fumaça voltando com
+       densidade 130 e as partículas religadas sozinhas. -->
   <h1>CFD2026</h1>
   <div class="sub">túnel de vento · LBM D3Q19 na GPU</div>
 
   <h2>execução</h2>
   <label>Backend <span class="val" id="vBackend">—</span></label>
-  <select id="backend"></select>
+  <select id="backend" autocomplete="off"></select>
   <label>Resolução <span class="val" id="vPreset">—</span></label>
-  <select id="preset"></select>
+  <select id="preset" autocomplete="off"></select>
   <div class="linha" style="margin-top:9px">
     <button id="rodar" class="primaria">⏸ pausar</button>
     <button id="reiniciar">↺ reiniciar</button>
   </div>
 
   <h2>modelo</h2>
-  <select id="modelo"></select>
+  <select id="modelo" autocomplete="off"></select>
   <label style="margin-top:8px">ou carregue um arquivo (STL, OBJ, PLY, GLB)</label>
-  <input type="file" id="arquivo" accept=".stl,.obj,.ply,.glb,.gltf">
+  <input type="file" id="arquivo" accept=".stl,.obj,.ply,.glb,.gltf" autocomplete="off">
   <label>Comprimento real <span class="val" id="vComp">—</span></label>
-  <input type="range" id="comprimento" min="0.5" max="12" step="0.1" value="4.5">
+  <input type="range" id="comprimento" min="0.5" max="12" step="0.1" value="4.5" autocomplete="off">
 
   <h2>escoamento</h2>
   <label>Velocidade <span class="val" id="vVel">30 m/s</span></label>
-  <input type="range" id="velocidade" min="5" max="90" step="1" value="30">
+  <input type="range" id="velocidade" min="5" max="90" step="1" value="30" autocomplete="off">
   <label>Guinada <span class="val" id="vGuinada">0°</span></label>
-  <input type="range" id="guinada" min="-20" max="20" step="1" value="0">
-  <label class="chk"><input type="checkbox" id="inverter"> inverter frente/trás</label>
+  <input type="range" id="guinada" min="-20" max="20" step="1" value="0" autocomplete="off">
+  <label class="chk"><input type="checkbox" id="inverter" autocomplete="off"> inverter frente/trás</label>
   <div id="sentido" style="color:var(--tenue);font-size:10.5px;margin:-2px 0 6px 22px"></div>
-  <label class="chk"><input type="checkbox" id="esteira" checked> esteira rolante</label>
-  <label class="chk"><input type="checkbox" id="les" checked> LES Smagorinsky</label>
+  <label class="chk"><input type="checkbox" id="esteira" checked autocomplete="off"> esteira rolante</label>
+  <label class="chk"><input type="checkbox" id="les" checked autocomplete="off"> LES Smagorinsky</label>
 
   <h2>medidas</h2>
   <div class="medida"><span>C<sub>d</sub></span><b id="cd">—</b></div>
@@ -108,16 +112,16 @@
   <div id="veredito">—</div>
 
   <h2>visualização</h2>
-  <label class="chk"><input type="checkbox" id="oFumaca" checked> fumaça volumétrica</label>
+  <label class="chk"><input type="checkbox" id="oFumaca" checked autocomplete="off"> fumaça volumétrica</label>
   <label>Densidade da fumaça <span class="val" id="vDens">48</span></label>
-  <input type="range" id="dens" min="8" max="130" step="2" value="48">
+  <input type="range" id="dens" min="8" max="130" step="2" value="48" autocomplete="off">
   <label>Filamentos do rake <span class="val" id="vRake">normal</span></label>
-  <input type="range" id="rake" min="0.5" max="2.5" step="0.1" value="1">
-  <label class="chk"><input type="checkbox" id="oEsteiras"> esteiras de partículas</label>
-  <label class="chk"><input type="checkbox" id="oCorpo" checked> carroceria</label>
-  <label class="chk"><input type="checkbox" id="oCp" checked> pintar C<sub>p</sub> na superfície</label>
+  <input type="range" id="rake" min="0.5" max="2.5" step="0.1" value="1" autocomplete="off">
+  <label class="chk"><input type="checkbox" id="oEsteiras" autocomplete="off"> esteiras de partículas</label>
+  <label class="chk"><input type="checkbox" id="oCorpo" checked autocomplete="off"> carroceria</label>
+  <label class="chk"><input type="checkbox" id="oCp" checked autocomplete="off"> pintar C<sub>p</sub> na superfície</label>
   <label>Ganho do C<sub>p</sub> <span class="val" id="vGanho">1,0×</span></label>
-  <input type="range" id="ganho" min="0.2" max="4" step="0.1" value="1">
+  <input type="range" id="ganho" min="0.2" max="4" step="0.1" value="1" autocomplete="off">
 
   <h2>verificação</h2>
   <div style="color:var(--tenue);line-height:1.7">
@@ -147,6 +151,34 @@ import { coeficientes, JanelaCd } from './src/core/forces.js';
 import { Renderer } from './src/render/renderer.js';
 
 const $ = id => document.getElementById(id);
+
+/*
+ * Impõe os padrões dos controles.
+ *
+ * O Chrome restaura valores de formulário ao recarregar, e para <input
+ * type=range> ele ignora autocomplete="off". Num painel de controle isso é
+ * pior que inútil: recarregar a página, que é o gesto universal de "volta ao
+ * estado limpo", devolvia velocidade de 90 m/s, guinada de 20° e a fumaça em
+ * densidade 130 — herdados de uma sessão anterior, sem nada indicando isso.
+ * A única forma confiável é escrever os valores de volta depois do load.
+ */
+const PADROES = {
+  comprimento: 4.7, velocidade: 30, guinada: 0, dens: 48, rake: 1, ganho: 1,
+  esteira: true, les: true, inverter: false,
+  oFumaca: true, oEsteiras: false, oCorpo: true, oCp: true,
+};
+function imporPadroes() {
+  for (const [id, v] of Object.entries(PADROES)) {
+    const el = $(id);
+    if (!el) continue;
+    if (el.type === 'checkbox') el.checked = v; else el.value = v;
+  }
+}
+imporPadroes();
+/* De novo depois do `pageshow`: o Chrome restaura o estado do formulário
+   DEPOIS da execução do módulo, então escrever os padrões só uma vez perde a
+   corrida — foi o que deixou a velocidade voltar em 83 m/s. */
+addEventListener('pageshow', () => { imporPadroes(); aplicarEscoamento?.(); });
 const fmt = (v, n = 3) => Number.isFinite(v) ? v.toFixed(n).replace('.', ',') : '—';
 
 const MODELOS = [
@@ -221,6 +253,10 @@ for (const m of MODELOS) {
   o.value = m.id; o.textContent = m.nome;
   selModelo.appendChild(o);
 }
+/* Explícito: um <select> populado por script depois do load ainda pode receber
+   o valor restaurado pelo navegador, e aí a interface diz um modelo e o app
+   carrega outro. */
+selModelo.value = MODELOS[0].id;
 
 /* ────────────────────────────────────────────────────────────── montagem */
 

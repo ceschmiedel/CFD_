@@ -7,27 +7,34 @@ sub-grid de Smagorinsky. Fumaça volumétrica advectada pelo campo, C<sub>p</sub
 pintado na carroceria, traços de ar rasgando o chão e forças por troca de
 momento.
 
-Sem servidor de simulação, sem instalação: o solver é WebGPU compute, e o que o
-visitante abre roda na placa dele.
+Sem servidor de simulação, sem instalação: roda na placa de quem abre o link —
+em WebGPU quando ele existe, em WebGL2 quando não, com a mesma física e a mesma
+imagem nos dois.
 
 > **Estado**: o núcleo é validado contra correlações experimentais (6/6, tabela
 > abaixo) e a suíte roda dentro do próprio app — **nos dois backends, com os
-> mesmos números**. O C<sub>d</sub> de veículos ainda **não converge** — ver
-> [Limitações](#limitações). Corpos canônicos sim. A visualização exige WebGPU;
-> o solver, não.
+> mesmos números**. O app inteiro, solver e visualização, roda em **WebGPU ou
+> WebGL2**. O C<sub>d</sub> de veículos ainda **não converge** — ver
+> [Limitações](#limitações). Corpos canônicos sim.
 
 ---
 
 ## Como rodar
 
 Precisa de um navegador com **WebGPU** (Chrome/Edge, Safari 18+, Firefox 141+)
-e de um servidor HTTP local — módulos ES não carregam de `file://`.
+**ou WebGL2** (praticamente qualquer um desta década) e de um servidor HTTP
+local — módulos ES não carregam de `file://`.
 
 ```bash
 python tools/servidor.py 8601
 ```
 
 Abra `http://localhost:8601/`. Nada para instalar, nada para compilar.
+
+O caminho é escolhido sozinho — WebGPU quando existe, WebGL2 quando não — e o
+seletor no painel troca entre eles (`?backend=webgl2` na URL faz o mesmo). A
+troca recarrega a página: um `<canvas>` aceita um tipo de contexto só na vida
+dele.
 
 O servidor manda `Cache-Control: no-store`. Isso não é detalhe: com o
 `http.server` padrão o navegador recarrega o HTML e mantém os módulos ES em
@@ -70,9 +77,9 @@ Feita a importação, cada `git push` na `master` publica sozinho.
 > visita — a tela de carregamento mostra o progresso em MB. O `DeLorean.STL`
 > tem 18 MB e só é baixado se escolhido.
 
-> **Quem abre sem WebGPU** vê uma explicação do porquê, não uma tela preta.
-> Chrome/Edge, Safari 18+ e Firefox 141+ têm; navegadores mais antigos e
-> algumas GPUs em lista de bloqueio, não.
+> **Quem abre sem WebGPU** cai no caminho WebGL2 sem perceber — solver e
+> visualização completos, ~10 % mais lento na mesma máquina. Só quem não tem
+> nenhum dos dois vê uma explicação, e não uma tela preta.
 
 ---
 
@@ -184,10 +191,21 @@ construções de WGSL que vazaram para o IR (`select`, o cast `f32` e `gid`) sã
 definidas no preâmbulo GLSL em vez de encher o IR de condicionais por backend,
 que é como uma física escrita uma vez volta a ser duas.
 
-**O que ainda não roda em WebGL2 é a imagem.** As quatro camadas de
-visualização são WGSL e dependem de compute e de textura 3D; enquanto elas não
-tiverem par em GLSL, o app exige WebGPU para desenhar mesmo com a física
-disponível nos dois caminhos.
+**A imagem também.** As quatro camadas — carroceria com C<sub>p</sub>, piso
+rolante, traços rasantes e fumaça volumétrica — existem nas duas linguagens, e
+a regra que as governa é a mesma dos dois lados: tudo o que aparece na tela é o
+campo resolvido. Sem compute, as partículas passam a viver em texturas
+atualizadas por um fragment shader e são lidas no vertex shader por
+`gl_InstanceID`; o volume de fumaça é uma `TEXTURE_3D` de verdade — `RGBA16F`
+filtrável em núcleo no WebGL2 —, escrita fatia por fatia com
+`framebufferTextureLayer`, o que dá a trilinear do hardware na advecção e no
+ray-march. A cena opaca vai para um alvo fora da tela com profundidade em
+textura, porque o ray-march precisa LER essa profundidade para não atravessar o
+carro.
+
+Medido na mesma máquina, preset Média com tudo ligado: **54 fps em WebGL2
+contra 62 em WebGPU**, e o mesmo C<sub>d</sub> (2,63 contra 2,65 na mesma
+janela de amostragem).
 
 O motivo é direto: um solver com dois backends e duas cópias da colisão tem,
 mais cedo ou mais tarde, duas físicas diferentes — e isso não aparece como erro
@@ -296,6 +314,7 @@ src/
     fumaca.js                 volume, advecção MacCormack, ray-march
     rasante.js                traços rente ao chão, a velocidade da cena
     comum.js, mat4.js
+    webgl2/                   as mesmas quatro camadas em GLSL ES 3.00
 tests/                        as suítes de verificação (abra no navegador)
 tools/servidor.py             servidor de desenvolvimento sem cache
 examples/                     modelos 3D

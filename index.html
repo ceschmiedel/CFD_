@@ -293,6 +293,7 @@
 <script type="module">
 import { sondar, PRESETS, presetsPara, presetInicial } from './src/backend/caps.js';
 import { SolverWebGPU } from './src/backend/webgpu/solver.js';
+import { SolverWebGL2 } from './src/backend/webgl2/solver.js';
 import { Units, stepsForFlowthrough } from './src/core/units.js';
 import { montarTipos, areaFrontalCorpo } from './src/core/tunel.js';
 import { voxelizar } from './src/geom/voxel.js';
@@ -300,6 +301,7 @@ import { ler } from './src/geom/parse.js';
 import { preparar } from './src/geom/prepare.js';
 import { coeficientes, JanelaCd } from './src/core/forces.js';
 import { Renderer } from './src/render/renderer.js';
+import { RendererWebGL2 } from './src/render/webgl2/renderer.js';
 
 const $ = id => document.getElementById(id);
 
@@ -446,20 +448,33 @@ const app = {
 /* ─────────────────────────────────────────────────────────── inicialização */
 
 const caps = await sondar();
+const gpu = caps.backends.find(b => b.id === 'webgpu');
+const gl2 = caps.backends.find(b => b.id === 'webgl2');
+
+/*
+ * Qual caminho roda esta sessão.
+ *
+ * A escolha é feita ANTES de tocar no canvas e não muda depois: um <canvas> só
+ * aceita um tipo de contexto na vida dele, então trocar de backend com a página
+ * aberta pediria destruir o elemento e reconstruir a interface em volta. Trocar
+ * pelo seletor recarrega com `?backend=`, que é uma linha em vez de uma
+ * máquina de estados — e recarregar é o que o usuário faria de qualquer forma.
+ *
+ * O padrão é WebGPU quando ele existe: ele é mais rápido em domínio grande e é
+ * onde este projeto tem mais quilometragem. Sem ele, o WebGL2 assume — e assume
+ * inteiro, com as quatro camadas, não como um modo degradado.
+ */
+const pedido = new URLSearchParams(location.search).get('backend');
+const BACKEND = (pedido === 'webgl2' && gl2?.disponivel) ? 'webgl2'
+  : (pedido === 'webgpu' && gpu?.disponivel) ? 'webgpu'
+  : gpu?.disponivel ? 'webgpu' : (gl2?.disponivel ? 'webgl2' : null);
+
 const selBackend = $('backend');
 for (const b of caps.backends) {
   const o = document.createElement('option');
   o.value = b.id;
   if (b.disponivel) {
-    /* O solver WebGL2 roda e é validado (tests/webgl2.html e
-     * tests/validacao.html?backend=webgl2). O que ainda não existe é a
-     * VISUALIZAÇÃO: as quatro camadas são WGSL e dependem de compute e de
-     * textura 3D. Selecionar este backend aqui daria física correta e tela
-     * preta, então ele fica desabilitado com o motivo à vista — anunciar o que
-     * falta é melhor que esconder o que existe. */
-    const pronto = b.id === 'webgpu';
-    o.textContent = b.nome + (pronto ? '' : ' — solver pronto, visualização não');
-    o.disabled = !pronto;
+    o.textContent = b.nome;
   } else {
     o.textContent = `${b.id} — indisponível`;
     o.disabled = true;
@@ -468,25 +483,36 @@ for (const b of caps.backends) {
   selBackend.appendChild(o);
 }
 
-const gpu = caps.backends.find(b => b.id === 'webgpu');
-if (!gpu?.disponivel) {
+if (!BACKEND) {
   $('carregando').innerHTML =
     `<div style="max-width:44ch;text-align:center;line-height:1.7">` +
-    `<b style="color:var(--erro)">WebGPU indisponível nesta máquina.</b><br><br>` +
-    `<span style="color:var(--tenue)">${gpu?.motivo ?? ''}</span><br><br>` +
-    `O SOLVER já roda em WebGL2, que existe em praticamente qualquer GPU desta ` +
-    `década, e é validado contra as mesmas correlações — o que ainda não tem ` +
-    `par em GLSL é a visualização, que depende de compute e de textura 3D.` +
-    `<br><br><a href="tests/webgl2.html">ver a física rodando aqui</a></div>`;
-  throw new Error('sem webgpu');
+    `<b style="color:var(--erro)">Nem WebGPU nem WebGL2 nesta máquina.</b><br><br>` +
+    `<span style="color:var(--tenue)">WebGPU: ${gpu?.motivo ?? ''}<br>` +
+    `WebGL2: ${gl2?.motivo ?? ''}</span></div>`;
+  throw new Error('sem backend');
 }
-selBackend.value = 'webgpu';
-$('vBackend').textContent = `${gpu.vendor} ${gpu.arquitetura}`.trim();
+selBackend.value = BACKEND;
+/* Trocar de backend recarrega — ver o comentário acima. */
+selBackend.onchange = () => {
+  location.search = `?backend=${selBackend.value}`;
+};
 
-app.device = await SolverWebGPU.criarDevice(gpu.adapter);
-app.renderer = new Renderer(app.device, $('tela'));
+const usado = BACKEND === 'webgpu' ? gpu : gl2;
+$('vBackend').textContent = BACKEND === 'webgpu'
+  ? `${gpu.vendor} ${gpu.arquitetura}`.trim()
+  : (gl2.renderer ?? '').replace(/^ANGLE \(|\)$/g, '').split(',')[0];
 
-const cabem = presetsPara(gpu);
+if (BACKEND === 'webgpu') {
+  app.device = await SolverWebGPU.criarDevice(gpu.adapter);
+  app.renderer = new Renderer(app.device, $('tela'));
+} else {
+  /* Um contexto só, compartilhado pelo solver e pelo renderizador: as texturas
+     do lattice são lidas direto pelos shaders de desenho, sem cópia. */
+  app.gl = SolverWebGL2.criarContexto($('tela'));
+  app.renderer = new RendererWebGL2(app.gl, $('tela'));
+}
+
+const cabem = presetsPara(usado);
 const selPreset = $('preset');
 for (const p of cabem) {
   const o = document.createElement('option');
@@ -496,7 +522,7 @@ for (const p of cabem) {
   if (!p.cabe) o.title = p.motivo;
   selPreset.appendChild(o);
 }
-selPreset.value = (presetInicial(gpu) ?? cabem[0]).id;
+selPreset.value = (presetInicial(usado) ?? cabem[0]).id;
 
 const selModelo = $('modelo');
 for (const m of MODELOS) {
@@ -619,7 +645,9 @@ async function _montar() {
   const antigo = app.solver;
   app.solver = null;
   antigo?.destruir();
-  app.solver = await SolverWebGPU.criar(app.device, grade);
+  app.solver = BACKEND === 'webgpu'
+    ? await SolverWebGPU.criar(app.device, grade)
+    : await SolverWebGL2.criar(app.gl, grade);
 
   const { tipo, esponja } = montarTipos({
     grade, corpo: vox.tipo, esteira: $('esteira').checked,

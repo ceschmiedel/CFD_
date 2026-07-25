@@ -427,7 +427,19 @@ export class SolverWebGL2 {
     this.passos = 0;
   }
 
-  /** Avança `n` passos. */
+  /**
+   * Avança `n` passos.
+   *
+   * E atualiza o campo macroscópico UMA VEZ no fim, não a cada passo.
+   *
+   * No WebGPU o campo sai de graça dentro do kernel — ele já somou as
+   * dezenove populações ali. Aqui é um passe à parte, e quem o consome é a
+   * renderização, que desenha uma vez por quadro: atualizá-lo por passo seria
+   * pagar n vezes por um resultado que só é lido uma. Deixar de atualizá-lo,
+   * por outro lado, dá uma cena em que a física corre e a imagem fica
+   * congelada num campo de zeros — que foi exatamente o primeiro resultado
+   * deste renderizador, com o Cd correto no painel e a fumaça parada na tela.
+   */
   passo(n = 1) {
     const r = this._rampa;
     if (r && r.atual < r.passos) {
@@ -441,6 +453,7 @@ export class SolverWebGL2 {
         this.atlas.w, this.atlas.h, N_ALVOS);
       this.frente = this.frente === 'A' ? 'B' : 'A';
     }
+    this.atualizarMacros();
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.passos += n;
   }

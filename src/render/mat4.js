@@ -37,6 +37,28 @@ export function perspectiva(fovY, aspecto, perto, longe) {
   ]);
 }
 
+/**
+ * Perspectiva com profundidade em [-1, 1] — a convenção do OpenGL/WebGL.
+ *
+ * Existe ao lado da versão [0,1] porque os dois caminhos de renderização deste
+ * projeto discordam nisso, e usar a matriz errada NÃO dá erro: o teste de
+ * profundidade continua monotônico, então a cena aparece certa e só a metade
+ * da faixa do buffer é usada. O que quebra é a reconstrução do mundo a partir
+ * da profundidade — que é justamente como o ray-march da fumaça sabe onde
+ * parar —, e o sintoma é fumaça atravessando o carro por uma razão que não tem
+ * nada a ver com fumaça.
+ */
+export function perspectivaGL(fovY, aspecto, perto, longe) {
+  const f = 1 / Math.tan(fovY / 2);
+  const nf = 1 / (perto - longe);
+  return new Float32Array([
+    f / aspecto, 0, 0, 0,
+    0, f, 0, 0,
+    0, 0, (longe + perto) * nf, -1,
+    0, 0, 2 * longe * perto * nf, 0,
+  ]);
+}
+
 export function olharPara(olho, alvo, cima) {
   const z = normalizar(subtrair(olho, alvo));
   const x = normalizar(produtoVetorial(cima, z));
@@ -127,26 +149,41 @@ export class Orbita {
     this.distancia = Math.min(60, Math.max(0.4, this.distancia * fator));
   }
 
-  /** Z é para cima: é a convenção do lattice (ver geom/prepare.js). */
-  matriz(aspecto) {
+  /**
+   * O campo de visão desta câmera, dado o formato da janela.
+   *
+   * Separado das matrizes porque os dois caminhos de renderização precisam do
+   * MESMO enquadramento com convenções de profundidade diferentes — e um fov
+   * duplicado é como as duas imagens acabam com zoom ligeiramente distinto.
+   */
+  fov(aspecto) {
     /*
      * Em retrato o enquadramento passa a ser pela HORIZONTAL.
      *
-     * Um fov vertical fixo dá fov horizontal = 2*atan(tan(fov/2) * aspecto): num
-     * celular de 390x844 o aspecto é 0,46 e o campo horizontal encolhe pela
+     * Um fov vertical fixo dá fov horizontal = 2*atan(tan(fov/2) * aspecto):
+     * num celular de 390x844 o aspecto é 0,46 e o campo horizontal encolhe pela
      * metade. Um carro é um objeto largo — ele saía pelos dois lados da tela
-     * enquanto sobrava espaço vazio acima e abaixo, e não havia como corrigir
-     * afastando a câmera porque a distância vem do enquadramento na montagem,
-     * que não conhece o formato da janela.
-     *
-     * Fixando o campo horizontal, o vertical é que cresce e o objeto cabe.
-     * O teto de 2 rad evita a distorção grotesca de uma janela muito estreita.
+     * enquanto sobrava espaço vazio acima e abaixo.
      */
-    const fovY = aspecto < 1
+    return aspecto < 1
       ? Math.min(2.0, 2 * Math.atan(Math.tan(0.85 / 2) / aspecto))
       : 0.85;
+  }
+
+  /** Profundidade em [-1,1], para o caminho WebGL2. */
+  matrizGL(aspecto) {
     return multiplicar(
-      perspectiva(fovY, aspecto, 0.05, 200),
+      perspectivaGL(this.fov(aspecto), aspecto, 0.05, 200),
+      olharPara(this.olho, this.alvo, [0, 0, 1]));
+  }
+
+  /** Z é para cima: é a convenção do lattice (ver geom/prepare.js). */
+  matriz(aspecto) {
+    /* Fixando o campo horizontal em retrato, o vertical é que cresce e o
+       objeto cabe — ver fov(). O teto de 2 rad evita a distorção grotesca de
+       uma janela muito estreita. */
+    return multiplicar(
+      perspectiva(this.fov(aspecto), aspecto, 0.05, 200),
       olharPara(this.olho, this.alvo, [0, 0, 1]));
   }
 }

@@ -303,6 +303,33 @@ export function presetsPara(backend) {
 export const ORCAMENTO_CONFORTAVEL = 1.5e9;
 
 /**
+ * O mesmo orçamento para um telefone.
+ *
+ * Um celular moderno passa nos limites declarados de presets que ele não roda:
+ * o teto de binding permite o lattice, a GPU móvel não entrega os passos. Meio
+ * giga de lattice num telefone dá segundos por quadro, e uma primeira
+ * impressão de app travado é pior que uma de app grosseiro — a resolução mais
+ * alta continua na lista para quem quiser esperar por ela.
+ */
+export const ORCAMENTO_MOVEL = 3e8;
+
+/**
+ * Qual orçamento vale nesta máquina.
+ *
+ * Ponteiro grosso E tela pequena: um notebook com tela de toque é um desktop, e
+ * um tablet grande com GPU decente também não precisa do orçamento reduzido.
+ * Fora do navegador (testes em node) não há matchMedia e vale o confortável.
+ */
+function orcamentoLocal() {
+  const mm = globalThis.matchMedia;
+  if (!mm) return ORCAMENTO_CONFORTAVEL;
+  const toque = mm.call(globalThis, '(pointer: coarse)').matches;
+  const menor = Math.min(globalThis.screen?.width ?? 1e4,
+                         globalThis.screen?.height ?? 1e4);
+  return toque && menor <= 520 ? ORCAMENTO_MOVEL : ORCAMENTO_CONFORTAVEL;
+}
+
+/**
  * Preset inicial: o maior que cabe no orçamento confortável.
  *
  * Deliberadamente conservador. O maior preset que "cabe" pelos limites
@@ -311,9 +338,9 @@ export const ORCAMENTO_CONFORTAVEL = 1.5e9;
  * conta. Quem quiser o teto escolhe o teto — a opção está na lista, marcada
  * com o tamanho e o número de células no corpo.
  */
-export function presetInicial(backend) {
+export function presetInicial(backend, orcamento = orcamentoLocal()) {
   const cabem = presetsPara(backend).filter(p => p.cabe);
   if (!cabem.length) return null;
-  const confortaveis = cabem.filter(p => p.bytes <= ORCAMENTO_CONFORTAVEL);
+  const confortaveis = cabem.filter(p => p.bytes <= orcamento);
   return confortaveis.length ? confortaveis[confortaveis.length - 1] : cabem[0];
 }

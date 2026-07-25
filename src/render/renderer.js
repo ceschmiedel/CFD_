@@ -231,20 +231,60 @@ export class Renderer {
     this._ligarInteracao();
   }
 
+  /*
+   * Órbita com um ponteiro, zoom com dois.
+   *
+   * Os ponteiros ativos ficam num mapa em vez de num par de variáveis porque no
+   * celular a roda do mouse não existe: sem pinça não há como aproximar, e um
+   * carro visto de longe num domínio dez vezes mais comprido que ele é o app
+   * inteiro reduzido a alguns pixels. Rastrear cada pointerId separadamente é o
+   * que permite distinguir "um dedo arrastando" de "dois dedos abrindo".
+   *
+   * Com dois dedos na tela a rotação é suspensa: durante uma pinça os dois
+   * ponteiros se movem, e aplicar o giro de cada um faria a câmera cambalear
+   * junto com o zoom.
+   */
   _ligarInteracao() {
     const c = this.canvas;
-    let arrastando = false, lx = 0, ly = 0;
+    const ativos = new Map();
+    let separacao = 0;
+
+    const distancia = () => {
+      const [a, b] = [...ativos.values()];
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    };
+
     c.addEventListener('pointerdown', e => {
-      arrastando = true; lx = e.clientX; ly = e.clientY; c.setPointerCapture(e.pointerId);
+      ativos.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      c.setPointerCapture(e.pointerId);
+      if (ativos.size === 2) separacao = distancia();
     });
-    c.addEventListener('pointerup', e => {
-      arrastando = false; c.releasePointerCapture(e.pointerId);
-    });
+
+    const soltar = e => {
+      ativos.delete(e.pointerId);
+      /* Tirar um dedo de uma pinça deixa o outro arrastando. Sem zerar isto, o
+         primeiro pointermove seguinte compararia a separação de dois dedos com
+         nada e daria um salto de zoom. */
+      if (ativos.size === 2) separacao = distancia(); else separacao = 0;
+    };
+    c.addEventListener('pointerup', soltar);
+    c.addEventListener('pointercancel', soltar);
+
     c.addEventListener('pointermove', e => {
-      if (!arrastando) return;
-      this.camera.girar((e.clientX - lx) * 0.008, (e.clientY - ly) * 0.008);
-      lx = e.clientX; ly = e.clientY;
+      const p = ativos.get(e.pointerId);
+      if (!p) return;
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      p.x = e.clientX; p.y = e.clientY;
+
+      if (ativos.size === 1) {
+        this.camera.girar(dx * 0.008, dy * 0.008);
+      } else if (ativos.size === 2) {
+        const d = distancia();
+        if (separacao > 0 && d > 0) this.camera.aproximar(separacao / d);
+        separacao = d;
+      }
     });
+
     c.addEventListener('wheel', e => {
       e.preventDefault();
       this.camera.aproximar(Math.exp(e.deltaY * 0.0011));
@@ -411,7 +451,17 @@ export class Renderer {
   }
 
   _redimensionar() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    /*
+     * O teto do dpr é mais baixo em tela pequena. Um telefone anuncia dpr 3, e
+     * o ray-march da fumaça custa por PIXEL: em 390x780 CSS, dpr 3 são 2,7
+     * milhões de pixels ray-marchados por quadro numa GPU móvel, contra 0,9
+     * milhão em dpr 1,75 — três vezes o custo para uma diferença que essa
+     * densidade não mostra. O corte é pela MENOR dimensão em CSS px, que é o
+     * que diz "isto é um telefone" (e pega o retrato e a paisagem do mesmo
+     * jeito); o dpr não diz, porque num notebook retina ele também é 2.
+     */
+    const compacto = Math.min(window.innerWidth, window.innerHeight) <= 480;
+    const dpr = Math.min(window.devicePixelRatio || 1, compacto ? 1.75 : 2);
     const w = Math.max(1, Math.round(this.canvas.clientWidth * dpr));
     const h = Math.max(1, Math.round(this.canvas.clientHeight * dpr));
     if (this.canvas.width === w && this.canvas.height === h && this.depth) return;

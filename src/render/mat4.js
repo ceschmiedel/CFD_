@@ -129,8 +129,24 @@ export class Orbita {
 
   /** Z é para cima: é a convenção do lattice (ver geom/prepare.js). */
   matriz(aspecto) {
+    /*
+     * Em retrato o enquadramento passa a ser pela HORIZONTAL.
+     *
+     * Um fov vertical fixo dá fov horizontal = 2*atan(tan(fov/2) * aspecto): num
+     * celular de 390x844 o aspecto é 0,46 e o campo horizontal encolhe pela
+     * metade. Um carro é um objeto largo — ele saía pelos dois lados da tela
+     * enquanto sobrava espaço vazio acima e abaixo, e não havia como corrigir
+     * afastando a câmera porque a distância vem do enquadramento na montagem,
+     * que não conhece o formato da janela.
+     *
+     * Fixando o campo horizontal, o vertical é que cresce e o objeto cabe.
+     * O teto de 2 rad evita a distorção grotesca de uma janela muito estreita.
+     */
+    const fovY = aspecto < 1
+      ? Math.min(2.0, 2 * Math.atan(Math.tan(0.85 / 2) / aspecto))
+      : 0.85;
     return multiplicar(
-      perspectiva(0.85, aspecto, 0.05, 200),
+      perspectiva(fovY, aspecto, 0.05, 200),
       olharPara(this.olho, this.alvo, [0, 0, 1]));
   }
 }

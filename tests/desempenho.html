@@ -1,5 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CFD2026 — desempenho do solver</title>
 <style>
   body { font: 13px/1.6 ui-monospace, Consolas, monospace; background: #0e1014;
@@ -11,6 +12,15 @@
   td, th { padding: 3px 20px 3px 0; text-align: left; }
   th { color: #5d6473; font-weight: 400; border-bottom: 1px solid #232833; }
   .num { color: #94c8ff; } .ok { color: #4ec9a0; } .warn { color: #e0af68; }
+
+  /* Celular: sem meta viewport estas páginas abriam em 980px e o telefone
+     reduzia tudo a um décimo; e uma tabela larga precisa de rolagem PRÓPRIA,
+     senão ela alarga a página e o texto passa a rolar de lado junto. */
+  @media (max-width: 640px) {
+    body { padding: 16px 14px; }
+    table { display: block; max-width: 100%; overflow-x: auto; }
+    progress, canvas { max-width: 100%; }
+  }
 </style>
 <h1>CFD2026 — desempenho do solver</h1>
 <p class="nota">MLUPS = milhões de atualizações de célula por segundo. O LBM é limitado por banda de

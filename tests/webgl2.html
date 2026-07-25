@@ -1,0 +1,207 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CFD2026 — emissor GLSL / caminho WebGL2</title>
+<style>
+  body { font: 13px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace;
+         background: #0e1014; color: #d6dae2; margin: 0; padding: 24px 28px; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .04em;
+       text-transform: uppercase; color: #7b8496; margin: 0 0 20px; }
+  h2 { font-size: 13px; font-weight: 600; color: #d6dae2;
+       margin: 26px 0 8px; border-bottom: 1px solid #232833; padding-bottom: 6px; }
+  table { border-collapse: collapse; margin: 6px 0 4px; }
+  td { padding: 2px 18px 2px 0; vertical-align: top; }
+  td:first-child { color: #7b8496; }
+  .ok   { color: #4ec9a0; }
+  .fail { color: #f0616d; }
+  .warn { color: #e0af68; }
+  .num  { color: #94c8ff; }
+  pre { background: #14171d; border: 1px solid #232833; border-radius: 4px;
+        padding: 10px 12px; overflow: auto; max-height: 340px; color: #9aa3b2; }
+  details { margin: 8px 0; }
+  summary { cursor: pointer; color: #7b8496; }
+  @media (max-width: 640px) {
+    body { padding: 16px 14px; }
+    table { display: block; max-width: 100%; overflow-x: auto; }
+  }
+</style>
+<h1>CFD2026 — emissor GLSL / caminho WebGL2</h1>
+<div id="saida">compilando…</div>
+
+<script type="module">
+/*
+ * O que esta página verifica.
+ *
+ * O emissor GLSL gera código a partir do MESMO ir.js que gera o WGSL, e o modo
+ * de falha característico de um gerador é produzir texto plausível que nenhum
+ * compilador aceita. Aqui o driver é o juiz: os três shaders são compilados e
+ * ligados de verdade num contexto WebGL2, e o log do driver aparece na íntegra
+ * quando algo falha.
+ *
+ * Isto NÃO é a validação da física — essa é tests/validacao.html, e ela só
+ * pode rodar quando o runtime WebGL2 existir. Aqui se responde uma pergunta
+ * anterior e necessária: o código que sai do emissor compila na máquina de
+ * quem abre a página?
+ */
+import { sondar, atlasLayout, PRESETS } from '../src/backend/caps.js';
+import {
+  shaderPasso, shaderInit, shaderMacros, VERTEX_COBERTURA, N_ALVOS,
+  planoDeTexturas,
+} from '../src/core/emit/glsl.js';
+import { Q } from '../src/core/lattice.js';
+
+const out = document.getElementById('saida');
+const html = [];
+const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const push = s => { html.push(s); out.innerHTML = html.join('\n'); };
+const h2 = t => push(`<h2>${esc(t)}</h2>`);
+const linha = (k, v, cls = '') =>
+  push(`<table><tr><td>${esc(k)}</td><td class="${cls}">${v}</td></tr></table>`);
+
+const resultados = [];
+function veredito(nome, passou, detalhe = '') {
+  resultados.push({ nome, passou });
+  linha(nome, `<span class="${passou ? 'ok' : 'fail'}">${passou ? 'PASSOU' : 'FALHOU'}</span>` +
+    (detalhe ? ` <span style="color:#7b8496">— ${detalhe}</span>` : ''));
+}
+const fonte = (titulo, txt) => push(
+  `<details><summary>${esc(titulo)} — ${txt.split('\n').length} linhas</summary>` +
+  `<pre>${esc(txt)}</pre></details>`);
+
+/* ──────────────────────────────────────────────────────── 0. o contexto */
+
+h2('0 — contexto WebGL2 desta máquina');
+const caps = await sondar();
+const gl2 = caps.backends.find(b => b.id === 'webgl2');
+linha('disponível', gl2?.disponivel
+  ? '<span class="ok">sim</span>'
+  : `<span class="fail">não</span> <span style="color:#7b8496">— ${esc(gl2?.motivo ?? '')}</span>`);
+if (gl2?.disponivel) {
+  linha('renderer', `<span class="num">${esc(gl2.renderer)}</span>`);
+  linha('textura máxima', `<span class="num">${gl2.limites.maxTexture}</span> px`);
+  linha('alvos MRT', `<span class="num">${gl2.limites.maxDrawBuffers}</span> ` +
+    `<span style="color:#7b8496">(${N_ALVOS} necessários para ${Q} populações)</span>`);
+  linha('float filtrável', gl2.temFloatLinear ? 'sim' : 'não (só nearest)');
+}
+
+const canvas = document.createElement('canvas');
+const gl = canvas.getContext('webgl2', { antialias: false, depth: false });
+if (!gl) {
+  push('<p class="fail">Sem contexto WebGL2 — nada a compilar.</p>');
+  throw new Error('sem webgl2');
+}
+gl.getExtension('EXT_color_buffer_float');
+
+/* ─────────────────────────────────────────────── 1. o atlas dos presets */
+
+h2('1 — ladrilhamento do lattice 3D em atlas 2D');
+push('<table>');
+for (const p of PRESETS) {
+  const a = atlasLayout(p.nx, p.ny, p.nz, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+  const bytes = a ? a.w * a.h * 16 * N_ALVOS * 2 : 0;   // RGBA32F, dois conjuntos
+  push(`<tr><td>${p.nome} ${p.nx}×${p.ny}×${p.nz}</td><td class="${a ? 'num' : 'fail'}">` +
+    (a ? `${a.tx}×${a.ty} ladrilhos · atlas ${a.w}×${a.h} · ` +
+         `${(bytes / 1e9).toFixed(2)} GB nas populações`
+       : 'não cabe na textura máxima') + '</td></tr>');
+}
+push('</table>');
+
+/* ────────────────────────────────────────────── 2. compilação de verdade */
+
+h2('2 — o driver compila o que o emissor gerou?');
+
+function compilar(tipo, src, rotulo) {
+  const s = gl.createShader(tipo);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(s);
+    veredito(rotulo, false, 'não compilou');
+    push(`<pre class="fail">${esc(log)}</pre>`);
+    /* O log do driver aponta a LINHA, então a fonte numerada é o que torna a
+       mensagem utilizável — sem ela, "0:412: error" é um enigma. */
+    push(`<details open><summary>fonte numerada</summary><pre>` +
+      esc(src.split('\n').map((l, i) => `${String(i + 1).padStart(4)} | ${l}`).join('\n')) +
+      `</pre></details>`);
+    gl.deleteShader(s);
+    return null;
+  }
+  return s;
+}
+
+function programa(rotulo, fs) {
+  const vs = compilar(gl.VERTEX_SHADER, VERTEX_COBERTURA, `${rotulo}: vertex`);
+  const f = compilar(gl.FRAGMENT_SHADER, fs, `${rotulo}: fragment`);
+  if (!vs || !f) return null;
+  const p = gl.createProgram();
+  gl.attachShader(p, vs); gl.attachShader(p, f);
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    veredito(`${rotulo}: link`, false, esc(gl.getProgramInfoLog(p)));
+    return null;
+  }
+  veredito(`${rotulo}: compila e liga`, true);
+  return p;
+}
+
+const fontes = {
+  passo: shaderPasso(),
+  init: shaderInit(),
+  macros: shaderMacros(),
+};
+
+const progs = {
+  passo: programa('passo (streaming + colisão)', fontes.passo),
+  init: programa('inicialização', fontes.init),
+  macros: programa('campo macroscópico', fontes.macros),
+};
+
+/* ───────────────────────────────────── 3. os uniformes existem mesmo? */
+
+h2('3 — uniformes que o runtime vai precisar ligar');
+/*
+ * Um uniforme não usado é REMOVIDO pelo compilador, e getUniformLocation
+ * devolve null — o runtime então liga o valor em lugar nenhum e o shader roda
+ * com o padrão. É uma das formas mais silenciosas de um backend dar resultado
+ * errado, e é barato conferir aqui.
+ */
+if (progs.passo) {
+  const esperados = ['uDim', 'uTiles', 'uOmega', 'uMagicU', 'uLesCsU',
+    'uBeltU', 'uInletU', 'uSponge', 'uTipo',
+    ...Array.from({ length: N_ALVOS }, (_, t) => `uSrc${t}`)];
+  const faltando = esperados.filter(n => gl.getUniformLocation(progs.passo, n) === null);
+  veredito('todos os uniformes sobreviveram à compilação', faltando.length === 0,
+    faltando.length ? `sem localização: ${faltando.join(', ')}` : `${esperados.length} conferidos`);
+}
+
+/* ───────────────────────────────────────── 4. o plano de empacotamento */
+
+h2('4 — onde cada uma das 19 populações mora');
+const plano = planoDeTexturas();
+push('<table><tr><td>textura</td><td>direções</td></tr>');
+for (let t = 0; t < N_ALVOS; t++) {
+  const dirs = plano.filter(p => p.textura === t).map(p => p.dir);
+  push(`<tr><td>uSrc${t} / oPop${t}</td><td class="num">${dirs.join(', ')}` +
+    (dirs.length < 4 ? ' <span style="color:#7b8496">(sobra componente)</span>' : '') + '</td></tr>');
+}
+push('</table>');
+
+/* ──────────────────────────────────────────────────────── 5. as fontes */
+
+h2('5 — código gerado');
+fonte('passo (o laço quente)', fontes.passo);
+fonte('inicialização', fontes.init);
+fonte('campo macroscópico', fontes.macros);
+
+/* ─────────────────────────────────────────────────────────── veredito */
+
+h2('resumo');
+const ok = resultados.filter(r => r.passou).length;
+linha('testes', `<span class="${ok === resultados.length ? 'ok' : 'fail'}">` +
+  `${ok}/${resultados.length}</span>`);
+push('<p style="color:#545c6b;max-width:70ch">Esta página verifica que o ' +
+  'emissor GLSL produz código que o driver aceita. A física do caminho WebGL2 ' +
+  'só passa a ser verificável quando o runtime existir — aí ' +
+  '<a href="validacao.html" style="color:#7fa9d8">validacao.html</a> roda nos ' +
+  'dois backends e os números têm de coincidir.</p>');
+</script>

@@ -106,6 +106,7 @@ Williamson & Brown 1998 / Roshko 1954 (Strouhal), Maskell para bloqueio
 | `tests/geometria.html` | Leitura dos seis modelos do repositório, voxelização, silhuetas em corte |
 | `tests/estabilidade.html` | Onde o solver perde estabilidade **com um carro dentro** |
 | `tests/desempenho.html` | MLUPS e banda efetiva por preset |
+| `tests/webgl2.html` | O emissor GLSL: compila e liga os três shaders no driver desta máquina, confere que nenhum uniforme foi eliminado e mostra o ladrilhamento do atlas por preset |
 
 ---
 
@@ -132,8 +133,18 @@ cerca de 5 fps sobre isso.
 
 A colisão TRT, o Smagorinsky e o bounce-back estão escritos **uma vez**, em
 `src/core/emit/ir.js`, em termos de um *dialeto* que sabe declarar uma variável
-e endereçar uma população na linguagem alvo. `wgsl.js` gera WGSL; `glsl.js`
-geraria GLSL para o caminho WebGL2.
+e endereçar uma população na linguagem alvo. `wgsl.js` gera WGSL para o WebGPU;
+`glsl.js` gera GLSL ES 3.00 para o caminho WebGL2 — os três shaders (passo,
+inicialização e campo macroscópico) compilam e ligam, verificados em
+`tests/webgl2.html`. Falta o runtime que os despacha.
+
+No WebGL2 não há compute nem storage buffer: o lattice 3D vira um atlas 2D
+(ladrilhos em z), as 19 populações vão em cinco texturas RGBA32F escritas de
+uma vez por MRT, e o kernel do passo é um fragment shader com ping-pong de
+framebuffer. Três construções de WGSL que vazaram para o IR (`select`, o cast
+`f32` e `gid`) são definidas no preâmbulo GLSL em vez de encher o IR de
+condicionais por backend — que é como uma física escrita uma vez volta a ser
+duas.
 
 O motivo é direto: um solver com dois backends e duas cópias da colisão tem,
 mais cedo ou mais tarde, duas físicas diferentes — e isso não aparece como erro

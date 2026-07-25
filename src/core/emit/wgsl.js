@@ -99,6 +99,10 @@ function dialeto(plano, prefSrc = 'src', prefDst = 'dst') {
     },
 
     letU32: (n, e) => `let ${n} = ${e};`,
+    /* O endereço do vizinho. Aqui é o mesmo `let` de sempre — o tipo é
+     * inferido; o dialeto GLSL precisa escrevê-lo, e é por isso que o IR pede
+     * este método em vez de reaproveitar letF32. */
+    letIdx: (n, e) => `let ${n} = ${e};`,
     ehTipo: (nome) => `ct == ${CELULA[nome]}u`,
     ehFluidoEm: (idx) => `tipo[${idx}] == ${CELULA.FLUIDO}u`,
     tipoEm: (idx) => `tipo[${idx}]`,

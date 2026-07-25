@@ -174,7 +174,10 @@ export function blocoPull(d) {
     }
     const j = OPP[i];
     const fonte = d.vizinho(-c[0], -c[1], -c[2]);
-    L.push(d.letF32(`s${i}`, fonte));
+    /* letIdx e não letF32: o endereço do vizinho não é um float. Em WGSL os
+     * dois emitem `let` e o tipo é inferido, então dava na mesma; em GLSL o tipo
+     * é escrito, e o endereço lá é um par de coordenadas de textura. */
+    L.push(d.letIdx(`s${i}`, fonte));
     L.push(d.letU32(`t${i}`, d.tipoEm(`s${i}`)));
     L.push(d.letVec3(`uw${i}`, d.velParedeDe(`t${i}`)));
     L.push(d.letF32(`g${i}`,

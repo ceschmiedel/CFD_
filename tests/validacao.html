@@ -54,6 +54,7 @@ addEventListener('error', e => {
 <script type="module">
 import { sondar, PRESETS } from '../src/backend/caps.js';
 import { SolverWebGPU } from '../src/backend/webgpu/solver.js';
+import { SolverWebGL2 } from '../src/backend/webgl2/solver.js';
 import { Units, stepsForFlowthrough } from '../src/core/units.js';
 import { montarTipos, corpoAnalitico, areaFrontalCorpo } from '../src/core/tunel.js';
 import { coeficientes, JanelaCd, strouhal } from '../src/core/forces.js';
@@ -67,9 +68,45 @@ const linha = (k,v) => el(`<table><tr><td>${esc(k)}</td><td>${v}</td></tr></tabl
 out.textContent = '';
 
 const caps = await sondar();
-const gpu = caps.backends.find(b => b.id === 'webgpu');
-if (!gpu?.disponivel) { el('<p class="discordante">Sem WebGPU.</p>'); throw new Error('sem webgpu'); }
-const device = await SolverWebGPU.criarDevice(gpu.adapter);
+
+/*
+ * Qual backend roda a suíte.
+ *
+ * A física dos dois sai do mesmo ir.js, então rodar as correlações
+ * experimentais em UM deles verifica a modelagem — mas só rodar nos DOIS
+ * verifica os backends. E os erros que sobram aqui (12% no Cd do cilindro, por
+ * exemplo) são de resolução e de modelo; se um backend der um número
+ * diferente, o erro é dele, e é este seletor que separa as duas coisas.
+ *
+ * `?backend=webgl2` na URL. Sem parâmetro, WebGPU.
+ */
+const BACKEND = new URLSearchParams(location.search).get('backend') === 'webgl2'
+  ? 'webgl2' : 'webgpu';
+
+let device = null, glCtx = null;
+if (BACKEND === 'webgl2') {
+  const g = caps.backends.find(b => b.id === 'webgl2');
+  if (!g?.disponivel) {
+    el(`<p class="discordante">Sem WebGL2: ${esc(g?.motivo ?? '')}</p>`);
+    throw new Error('sem webgl2');
+  }
+  glCtx = SolverWebGL2.criarContexto();
+} else {
+  const gpu = caps.backends.find(b => b.id === 'webgpu');
+  if (!gpu?.disponivel) { el('<p class="discordante">Sem WebGPU.</p>'); throw new Error('sem webgpu'); }
+  device = await SolverWebGPU.criarDevice(gpu.adapter);
+}
+
+/** Um solver do backend escolhido. Os dois têm a mesma API pública. */
+const criarSolver = (grade) => BACKEND === 'webgl2'
+  ? SolverWebGL2.criar(glCtx, grade)
+  : SolverWebGPU.criar(device, grade);
+
+const outro = BACKEND === 'webgl2' ? 'webgpu' : 'webgl2';
+el(`<p class="nota">Rodando em <b style="color:#94c8ff">${BACKEND === 'webgl2'
+  ? 'WebGL2 (fragment)' : 'WebGPU (compute)'}</b> — ` +
+  `<a href="?${outro === 'webgl2' ? 'backend=webgl2' : ''}" style="color:#7fa9d8">` +
+  `rodar em ${outro}</a> e comparar os números.</p>`);
 
 const resumo = [];
 
@@ -87,7 +124,7 @@ el('<p class="nota">Duas paredes paralelas, a de cima movendo-se. Em regime a so
   const U = 0.04;
   const tabela = [];
   for (const omega of [0.7, 1.0, 1.6]) {
-    const s = await SolverWebGPU.criar(device, { nx, ny, nz });
+    const s = await criarSolver({ nx, ny, nz });
     const tipo = new Uint32Array(s.N);
     const CEL = { SOLIDO: 1, SOLIDO_MOVEL: 4 };
     for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
@@ -178,7 +215,7 @@ for (const caso of CASOS.filter(c => PROFUNDO || !c.profundo)) {
   units.nuLb = nuLb; units.omegaPlus = omega;
   units.reLattice = uLb * D / nuLb;
 
-  const s = await SolverWebGPU.criar(device, grade);
+  const s = await criarSolver(grade);
   const corpo = corpoAnalitico(grade, {
     tipo: caso.forma,
     cx: grade.nx * 0.30, cy: grade.ny * 0.5, cz: grade.nz * 0.5,

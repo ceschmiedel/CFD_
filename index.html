@@ -451,10 +451,14 @@ for (const b of caps.backends) {
   const o = document.createElement('option');
   o.value = b.id;
   if (b.disponivel) {
-    /* O caminho WebGL2 tem detecção e emissor prontos e runtime ainda não.
-     * Anunciá-lo como se rodasse seria pior que não anunciá-lo. */
+    /* O solver WebGL2 roda e é validado (tests/webgl2.html e
+     * tests/validacao.html?backend=webgl2). O que ainda não existe é a
+     * VISUALIZAÇÃO: as quatro camadas são WGSL e dependem de compute e de
+     * textura 3D. Selecionar este backend aqui daria física correta e tela
+     * preta, então ele fica desabilitado com o motivo à vista — anunciar o que
+     * falta é melhor que esconder o que existe. */
     const pronto = b.id === 'webgpu';
-    o.textContent = b.nome + (pronto ? '' : ' — runtime pendente');
+    o.textContent = b.nome + (pronto ? '' : ' — solver pronto, visualização não');
     o.disabled = !pronto;
   } else {
     o.textContent = `${b.id} — indisponível`;
@@ -470,8 +474,10 @@ if (!gpu?.disponivel) {
     `<div style="max-width:44ch;text-align:center;line-height:1.7">` +
     `<b style="color:var(--erro)">WebGPU indisponível nesta máquina.</b><br><br>` +
     `<span style="color:var(--tenue)">${gpu?.motivo ?? ''}</span><br><br>` +
-    `O caminho WebGL2, que roda em praticamente qualquer GPU desta década, ` +
-    `está detectado e com o emissor de shaders pronto — falta o runtime.</div>`;
+    `O SOLVER já roda em WebGL2, que existe em praticamente qualquer GPU desta ` +
+    `década, e é validado contra as mesmas correlações — o que ainda não tem ` +
+    `par em GLSL é a visualização, que depende de compute e de textura 3D.` +
+    `<br><br><a href="tests/webgl2.html">ver a física rodando aqui</a></div>`;
   throw new Error('sem webgpu');
 }
 selBackend.value = 'webgpu';

@@ -30,19 +30,36 @@ memória: cada passo lê 19 floats e escreve 19, ou 152 bytes por célula. O tet
 <script type="module">
 import { sondar, PRESETS } from '../src/backend/caps.js';
 import { SolverWebGPU } from '../src/backend/webgpu/solver.js';
+import { SolverWebGL2 } from '../src/backend/webgl2/solver.js';
 
 const s = document.getElementById('s');
 const caps = await sondar();
-const gpu = caps.backends.find(b => b.id === 'webgpu');
-if (!gpu?.disponivel) { s.textContent = 'sem WebGPU'; throw 0; }
-const device = await SolverWebGPU.criarDevice(gpu.adapter);
+
+/* `?backend=webgl2` mede o caminho sem compute. A comparação entre os dois na
+   MESMA maquina e o unico jeito honesto de dizer quanto ele custa — numeros de
+   maquinas diferentes nao se comparam. */
+const BACKEND = new URLSearchParams(location.search).get('backend') === 'webgl2'
+  ? 'webgl2' : 'webgpu';
+let device = null, glCtx = null;
+if (BACKEND === 'webgl2') {
+  const g = caps.backends.find(b => b.id === 'webgl2');
+  if (!g?.disponivel) { s.textContent = `sem WebGL2: ${g?.motivo ?? ''}`; throw 0; }
+  glCtx = SolverWebGL2.criarContexto();
+} else {
+  const gpu = caps.backends.find(b => b.id === 'webgpu');
+  if (!gpu?.disponivel) { s.textContent = 'sem WebGPU'; throw 0; }
+  device = await SolverWebGPU.criarDevice(gpu.adapter);
+}
+const criarSolver = (g) => BACKEND === 'webgl2'
+  ? SolverWebGL2.criar(glCtx, g) : SolverWebGPU.criar(device, g);
+const outro = BACKEND === 'webgl2' ? 'webgpu' : 'webgl2';
 
 const linhas = [];
 for (const p of PRESETS.slice(0, 4)) {
   s.textContent = `medindo ${p.nome} (${p.nx}×${p.ny}×${p.nz})…`;
   await new Promise(r => setTimeout(r, 30));
   let solver;
-  try { solver = await SolverWebGPU.criar(device, p); }
+  try { solver = await criarSolver(p); }
   catch (e) { linhas.push({ p, erro: e.message }); continue; }
 
   solver.definirTipos(new Uint32Array(solver.N));
@@ -65,7 +82,10 @@ for (const p of PRESETS.slice(0, 4)) {
 }
 
 const alvo60 = (m, cells) => m * 1e6 / cells;   // passos/s
-s.innerHTML = '<table><tr><th>preset</th><th>células</th><th>MLUPS</th>' +
+s.innerHTML = `<p class="nota">Medido em <b class="num">${BACKEND === 'webgl2'
+  ? 'WebGL2 (fragment)' : 'WebGPU (compute)'}</b> — ` +
+  `<a href="?${outro === 'webgl2' ? 'backend=webgl2' : ''}" style="color:#7fa9d8">medir em ${outro}</a>` +
+  '</p>' + '<table><tr><th>preset</th><th>células</th><th>MLUPS</th>' +
   '<th>banda efetiva</th><th>passos/s</th><th>a 60 fps</th></tr>' +
   linhas.map(r => {
     if (r.erro) return `<tr><td>${r.p.nome}</td><td colspan="5" class="warn">${r.erro}</td></tr>`;

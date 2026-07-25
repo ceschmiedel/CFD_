@@ -11,8 +11,10 @@ Sem servidor de simulação, sem instalação: o solver é WebGPU compute, e o q
 visitante abre roda na placa dele.
 
 > **Estado**: o núcleo é validado contra correlações experimentais (6/6, tabela
-> abaixo) e a suíte roda dentro do próprio app. O C<sub>d</sub> de veículos
-> ainda **não converge** — ver [Limitações](#limitações). Corpos canônicos sim.
+> abaixo) e a suíte roda dentro do próprio app — **nos dois backends, com os
+> mesmos números**. O C<sub>d</sub> de veículos ainda **não converge** — ver
+> [Limitações](#limitações). Corpos canônicos sim. A visualização exige WebGPU;
+> o solver, não.
 
 ---
 
@@ -78,7 +80,13 @@ Feita a importação, cada `git push` na `master` publica sozinho.
 
 Cada caso roda o solver completo — voxelização, contornos, troca de momento — e
 compara com um ajuste experimental publicado. Abra
-`http://localhost:8601/tests/validacao.html` e confira você mesmo.
+`http://localhost:8601/tests/validacao.html` e confira você mesmo;
+`?backend=webgl2` roda a mesma suíte no outro caminho.
+
+**Os seis casos passam nos dois backends, com os mesmos números** — a tabela
+abaixo vale para WebGPU e WebGL2 indistintamente. É o que se espera de uma
+física escrita uma vez só, e é o único jeito de saber que ela foi mesmo escrita
+uma vez só.
 
 | Caso | Medido | Referência | Erro |
 |---|---|---|---|
@@ -105,7 +113,7 @@ Williamson & Brown 1998 / Roshko 1954 (Strouhal), Maskell para bloqueio
 | `tests/nucleo.html` | Invariantes D3Q19, escoamento uniforme preservado a 1,9e-8, viscosidade medida por decaimento de onda de cisalhamento (0,04–1,07 % de erro em ω de 0,6 a 1,8), conservação de massa |
 | `tests/geometria.html` | Leitura dos seis modelos do repositório, voxelização, silhuetas em corte |
 | `tests/estabilidade.html` | Onde o solver perde estabilidade **com um carro dentro** |
-| `tests/desempenho.html` | MLUPS e banda efetiva por preset |
+| `tests/desempenho.html` | MLUPS e banda efetiva por preset, nos dois backends (`?backend=webgl2`) |
 | `tests/webgl2.html` | O caminho WebGL2 inteiro: os cinco shaders compilam no driver desta máquina, escoamento uniforme preservado, viscosidade medida por decaimento de onda, e o **confronto com o WebGPU** no mesmo caso — campo e força lado a lado |
 
 ---
@@ -124,6 +132,34 @@ Medido numa RTX 4080, WebGPU:
 ~60 % do pico teórico da placa. O LBM é limitado por banda: 152 bytes por
 célula por passo (19 populações lidas, 19 escritas). A fumaça volumétrica custa
 cerca de 5 fps sobre isso.
+
+### E o WebGL2 custa quanto?
+
+Medido em seguida, na mesma máquina e na mesma sessão (`?backend=webgl2`):
+
+| Preset | WebGL2 | WebGPU na mesma sessão | razão |
+|---|---|---|---|
+| Mínima | 1 544 MLUPS | 1 286 | **0,83×** |
+| Baixa | 1 396 | 1 313 | 0,94× |
+| Média | 1 345 | 1 322 | 0,98× |
+| Alta | 1 111 | 1 290 | 1,16× |
+
+Empate, e o caminho sem compute chega a ganhar no domínio pequeno — onde o
+custo por despacho pesa mais que a banda, e um `drawArrays` de três vértices é
+mais barato que um dispatch de compute. O prognóstico de "2 a 4× mais lento"
+que este README carregou desde antes de existir runtime estava errado, e a
+razão é que o LBM é limitado por BANDA de memória: quem decide o número é
+quanto se lê e se escreve por célula, não se o kernel é compute ou fragment.
+
+**A ressalva, e ela é grande.** O WebGPU mediu 1 300 MLUPS nesta sessão contra
+os 2 800 da tabela acima, medidos em outra. A máquina não estava no mesmo
+estado — mesma placa, condição diferente —, e por isso só a RAZÃO medida
+lado a lado vale alguma coisa; os absolutos das duas tabelas não se comparam
+entre si. Rode as duas você mesmo antes de acreditar em qualquer das duas.
+
+Uma consequência prática: com 6,55 M de células o WebGL2 dá 205 passos/s, ou
+três subpassos por quadro de 60 Hz. Isso é escoamento vivo na tela — o caminho
+sem WebGPU não é um modo degradado do solver, é o mesmo solver.
 
 ---
 

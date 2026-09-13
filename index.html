@@ -253,13 +253,14 @@
   <div id="veredito">—</div>
 
   <h2>visualização</h2>
-  <label class="chk"><input type="checkbox" id="oFumaca" checked autocomplete="off"> fumaça volumétrica</label>
+  <label class="chk"><input type="checkbox" id="oFiletes" checked autocomplete="off"> filetes de fumaça (pente)</label>
+  <label class="chk"><input type="checkbox" id="oFumaca" autocomplete="off"> fumaça volumétrica</label>
   <label>Densidade da fumaça <span class="val" id="vDens">70</span></label>
   <input type="range" id="dens" min="10" max="240" step="2" value="70" autocomplete="off">
   <label>Colunas de filamentos <span class="val" id="vColunas">7</span></label>
-  <input type="range" id="colunas" min="1" max="20" step="1" value="7" autocomplete="off">
+  <input type="range" id="colunas" min="1" max="20" step="1" value="9" autocomplete="off">
   <label>Linhas de filamentos <span class="val" id="vLinhas">5</span></label>
-  <input type="range" id="linhas" min="1" max="14" step="1" value="5" autocomplete="off">
+  <input type="range" id="linhas" min="1" max="14" step="1" value="6" autocomplete="off">
   <label class="chk"><input type="checkbox" id="oRasantes" checked autocomplete="off"> rasantes de solo</label>
   <label>Intensidade das rasantes <span class="val" id="vRasa">1,0×</span></label>
   <input type="range" id="rasa" min="0" max="2.5" step="0.1" value="1" autocomplete="off">
@@ -317,9 +318,10 @@ const $ = id => document.getElementById(id);
  */
 const PADROES = {
   comprimento: 4.7, velocidade: 30, guinada: 0, dens: 70, ganho: 1,
-  colunas: 7, linhas: 5, rasa: 1,
+  colunas: 9, linhas: 6, rasa: 1,
   esteira: true, les: true, inverter: false,
-  oFumaca: true, oEsteiras: false, oCorpo: true, oCp: true, oRasantes: true,
+  oFiletes: true, oFumaca: false, oEsteiras: false, oCorpo: true, oCp: true,
+  oRasantes: true,
 };
 function imporPadroes() {
   for (const [id, v] of Object.entries(PADROES)) {
@@ -845,6 +847,7 @@ $('rodar').onclick = () => {
 };
 $('reiniciar').onclick = () => {
   app.solver?.inicializar();
+  app.renderer?.filetes?.limpar();
   app.janCd.limpar(); app.janCl.limpar();
 };
 /* Fecha a gaveta no que remonta o domínio: a barra de progresso e o "voxelizando"
@@ -873,6 +876,8 @@ for (const id of ['velocidade', 'comprimento', 'les']) {
 }
 $('oEsteiras').onchange = e => { app.renderer.opcoes.esteiras = e.target.checked; };
 $('oFumaca').onchange = e => { app.renderer.opcoes.fumaca = e.target.checked; };
+/* Só existe no caminho WebGPU por enquanto; no WebGL2 o checkbox não faz nada. */
+$('oFiletes').onchange = e => { app.renderer.opcoes.filetes = e.target.checked; };
 /* Os deslizadores de visualização são disparados por imporPadroes() no
    `pageshow`, que pode chegar antes de haver renderizador ou volume montado —
    daí os acessos opcionais. A etiqueta é escrita de qualquer forma: ela mostra
@@ -888,11 +893,13 @@ $('dens').oninput = e => {
 $('colunas').oninput = e => {
   const n = +e.target.value;
   app.renderer?.fumaca?.definirGrade({ colunas: n });
+  app.renderer?.filetes?.definirGrade({ colunas: n });
   $('vColunas').textContent = n;
 };
 $('linhas').oninput = e => {
   const n = +e.target.value;
   app.renderer?.fumaca?.definirGrade({ linhas: n });
+  app.renderer?.filetes?.definirGrade({ linhas: n });
   $('vLinhas').textContent = n;
 };
 $('oRasantes').onchange = e => { app.renderer.opcoes.rasantes = e.target.checked; };

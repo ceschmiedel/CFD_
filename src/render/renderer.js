@@ -44,6 +44,7 @@ import { Orbita, inversa } from './mat4.js';
 import { CENA, TURBO, CENA_BYTES } from './comum.js';
 import { VolumeFumaca } from './fumaca.js';
 import { Rasantes } from './rasante.js';
+import { Filetes } from './filete.js';
 
 /* ───────────────────────────────────────────────────────────────── esteiras */
 
@@ -247,8 +248,11 @@ export class Renderer {
     this.ctx.configure({ device, format: this.formato, alphaMode: 'opaque' });
     this.camera = new Orbita({ alvo: [0, 0, 0.35], distancia: 2.6 });
     this.opcoes = {
-      cp: true, ganhoCp: 1.0, esteiras: false, corpo: true, fumaca: true,
+      cp: true, ganhoCp: 1.0, esteiras: false, corpo: true, fumaca: false,
       rasantes: true,
+      /* Filetes como geometria (filete.js) são o padrão; o volume fica atrás
+       * do seletor para comparação. Ver o cabeçalho de filete.js. */
+      filetes: true,
       /* Velocidade do cinto em unidades de lattice, escrita pelo app a cada
        * ajuste de escoamento. Zero com a esteira desligada — e aí a grade do
        * piso fica parada, que é o que um chão fixo faz. */
@@ -433,6 +437,9 @@ export class Renderer {
       n: solver.nx >= 280 ? 2000 : 1200,
     });
     await this.rasantes.preparar(this.uCena, this.formato);
+    this.filetes?.destruir();
+    this.filetes = new Filetes(d, solver);
+    await this.filetes.preparar(this.uCena, this.formato);
     this.depth = null;            // força recriação e religação da profundidade
 
     this.grupoCorpo = d.createBindGroup({
@@ -465,6 +472,7 @@ export class Renderer {
     this.camera.distancia = Math.max(0.5, diag * 1.9);
     this.fumaca?.posicionarRake(extentos);
     this.rasantes?.posicionarFaixa(extentos);
+    this.filetes?.posicionarRake(extentos);
   }
 
   /** Sobe a malha do corpo (posições no espaço do lattice). */
@@ -591,14 +599,18 @@ export class Renderer {
       cp.dispatchWorkgroups(Math.ceil(this.nParticulas / 64));
       cp.end();
     }
+    /* Tamanho de um pixel em unidades de mundo a uma unidade da câmera:
+     * 2·tan(fov/2)/altura. É o que a fita precisa para não ficar sub-pixel
+     * ao longe, e só aqui se sabe o fov (mat4) e a altura do canvas. */
+    const mundoPorPixel = 2 * Math.tan(0.85 / 2) / this.canvas.height;
     if (this.opcoes.rasantes && this.rasantes) {
-      /* Tamanho de um pixel em unidades de mundo a uma unidade da câmera:
-       * 2·tan(fov/2)/altura. É o que a fita precisa para não ficar sub-pixel
-       * ao longe, e só aqui se sabe o fov (mat4) e a altura do canvas. */
       this.rasantes.avancar(enc, {
-        mundoPorPixel: 2 * Math.tan(0.85 / 2) / this.canvas.height,
+        mundoPorPixel,
         distanciaCamera: this.camera.distancia,
       });
+    }
+    if (this.opcoes.filetes && this.filetes && dtVisual > 0) {
+      this.filetes.avancar(enc, { mundoPorPixel });
     }
     if (this.opcoes.fumaca && f) {
       /* A fumaça no mesmo relógio. Ela acumula e dispara passos grandes (ver
@@ -652,6 +664,7 @@ export class Renderer {
     /* Por último no passe opaco: são aditivas, e somar por cima do que já foi
      * escrito é o resultado certo independente da ordem entre elas. */
     if (this.opcoes.rasantes) this.rasantes?.desenhar(rp);
+    if (this.opcoes.filetes) this.filetes?.desenhar(rp);
     rp.end();
 
     if (this.opcoes.fumaca && f) {

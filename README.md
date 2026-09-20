@@ -31,6 +31,12 @@ python tools/servidor.py 8601
 
 Abra `http://localhost:8601/`. Nada para instalar, nada para compilar.
 
+Na entrada o túnel está vazio e uma caixa de boas-vindas explica o passo a
+passo: **backend**, **resolução** e, por último, **modelo** — da lista ou um
+arquivo seu — e é o modelo que liga a simulação. A caixa volta pelo botão
+**? ajuda** do painel, e cada controle tem um ⓘ que explica o que ele faz e o
+que ele custa.
+
 O caminho é escolhido sozinho — WebGPU quando existe, WebGL2 quando não — e o
 seletor no painel troca entre eles (`?backend=webgl2` na URL faz o mesmo). A
 troca recarrega a página: um `<canvas>` aceita um tipo de contexto só na vida

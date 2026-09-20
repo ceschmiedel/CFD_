@@ -58,6 +58,42 @@
   .linha { display: flex; gap: 6px; }
   button:disabled { opacity: .45; cursor: default; }
   #relatorioEstado { color: var(--tenue); font-size: 10.5px; margin-top: 3px; }
+  #ajuda { width: auto; float: right; padding: 1px 7px; font-size: 10px; margin-top: -2px; }
+
+  /* Dicas: o balão nasce do atributo, abre no hover e no foco (toque). O
+     balão é posicionado em relação ao RÓTULO, e não ao ícone, para caber na
+     largura do painel em vez de ser cortado pela rolagem. */
+  label, .medida { position: relative; }
+  .dica { display: inline-block; margin-left: 5px; width: 13px; height: 13px; line-height: 12px;
+          text-align: center; border-radius: 50%; border: 1px solid var(--borda);
+          color: var(--tenue); font-size: 9px; cursor: help; vertical-align: 1px; }
+  .dica:hover, .dica:focus { color: var(--dado); border-color: #39424f; outline: none; }
+  .dica::after { content: attr(data-dica); display: none; position: absolute; left: 0; right: 0;
+                 top: calc(100% + 4px); z-index: 20; padding: 8px 10px; background: #151a22;
+                 color: var(--texto); border: 1px solid #2c3544; border-radius: 4px;
+                 font: 400 11px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace;
+                 text-transform: none; letter-spacing: 0; white-space: normal; text-align: left;
+                 box-shadow: 0 8px 22px rgba(0,0,0,.55); }
+  #ajuda { white-space: nowrap; }
+  .dica:hover::after, .dica:focus::after, .dica.aberta::after { display: block; }
+  .sub { display: flex; align-items: center; gap: 8px; }
+  .sub #ajuda { margin-left: auto; float: none; }
+
+  /* Boas-vindas: o passo a passo antes de qualquer coisa rodar. */
+  #boasVindas { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.72);
+                display: grid; place-items: center; padding: 16px; }
+  #boasVindas[hidden] { display: none; }
+  #boasVindas .caixa { max-width: 560px; max-height: 92vh; overflow-y: auto; background: var(--painel);
+                       border: 1px solid #2c3544; border-radius: 6px; padding: 22px 26px;
+                       font-size: 12.5px; line-height: 1.65; box-shadow: 0 20px 60px rgba(0,0,0,.6); }
+  #boasVindas h3 { margin: 0 0 4px; font-size: 15px; letter-spacing: .06em; text-transform: uppercase; }
+  #boasVindas p { margin: 8px 0; color: var(--fraco); }
+  #boasVindas ol { margin: 10px 0; padding-left: 22px; }
+  #boasVindas li { margin: 6px 0; color: var(--fraco); }
+  #boasVindas b { color: var(--texto); }
+  #boasVindas .rodape { display: flex; align-items: center; justify-content: space-between;
+                        gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+  #boasVindas .rodape button { width: auto; padding: 7px 18px; }
   .chk { display: flex; align-items: center; gap: 7px; color: var(--fraco);
          margin: 7px 0; cursor: pointer; }
   .chk input { accent-color: #4a7fb5; cursor: pointer; }
@@ -216,64 +252,69 @@
        devolve os padrões. Aqui isso apareceu como a fumaça voltando com
        densidade 130 e as partículas religadas sozinhas. -->
   <h1>CFD2026</h1>
-  <div class="sub">túnel de vento · LBM D3Q19 na GPU</div>
+  <div class="sub">túnel de vento · LBM D3Q19 na GPU
+    <button id="ajuda" type="button" title="como funciona, passo a passo">? ajuda</button></div>
 
-  <h2>execução</h2>
-  <label>Backend <span class="val" id="vBackend">—</span></label>
+  <!-- As dicas (ⓘ) são CSS puro: `data-dica` vira o balão via attr(), e ele
+       abre no hover E no foco, então um toque no celular (tabindex) também
+       abre. Nada de biblioteca para vinte frases. -->
+  <h2>1 · execução</h2>
+  <label>Backend<span class="dica" tabindex="0" data-dica="Onde a física roda. WebGPU (compute) é o caminho principal e o mais rápido em domínios grandes; WebGL2 (fragment) roda em praticamente qualquer navegador desta década, com a mesma física gerada do mesmo código. Trocar recarrega a página: um canvas aceita um só tipo de contexto na vida dele.">ⓘ</span> <span class="val" id="vBackend">—</span></label>
   <select id="backend" autocomplete="off"></select>
-  <label>Resolução <span class="val" id="vPreset">—</span></label>
+  <label>Resolução<span class="dica" tabindex="0" data-dica="Tamanho do túnel em células e quantas delas cabem no comprimento do corpo. Mais células: mais detalhe na forma, mais Reynolds resolvido e menos bloqueio, mas cada passo custa proporcionalmente mais e a memória da placa limita. Presets que não cabem na sua GPU aparecem desabilitados. Trocar remonta a simulação.">ⓘ</span> <span class="val" id="vPreset">—</span></label>
   <select id="preset" autocomplete="off"></select>
   <div class="linha" style="margin-top:9px">
-    <button id="rodar" class="primaria">⏸ pausar</button>
-    <button id="reiniciar">↺ reiniciar</button>
+    <button id="rodar" class="primaria" title="pausa ou retoma o avanço do escoamento; a câmera continua livre">⏸ pausar</button>
+    <button id="reiniciar" title="recomeça o escoamento do repouso, com a mesma geometria e os mesmos parâmetros">↺ reiniciar</button>
   </div>
 
-  <h2>modelo</h2>
+  <h2>2 · modelo</h2>
+  <label>Modelo<span class="dica" tabindex="0" data-dica="A malha é voxelizada dentro do túnel: cada célula vira fluido ou sólido. Aceita STL, OBJ, PLY e GLB, inclusive malhas abertas ou com normais invertidas. O eixo mais longo vira o comprimento e o nariz é detectado pela altura das pontas; se errar, use inverter frente/trás. Ao carregar, a simulação começa sozinha.">ⓘ</span></label>
   <select id="modelo" autocomplete="off"></select>
   <label style="margin-top:8px">ou carregue um arquivo (STL, OBJ, PLY, GLB)</label>
   <input type="file" id="arquivo" accept=".stl,.obj,.ply,.glb,.gltf" autocomplete="off">
-  <label>Comprimento real <span class="val" id="vComp">—</span></label>
+  <label>Comprimento real<span class="dica" tabindex="0" data-dica="O tamanho físico do modelo, que fixa a escala: quantos metros vale uma célula e quantos segundos vale um passo. Junto com a velocidade define o Reynolds físico, U·L/ν. O lattice não muda; muda o que cada célula representa.">ⓘ</span> <span class="val" id="vComp">—</span></label>
   <input type="range" id="comprimento" min="0.5" max="12" step="0.1" value="4.5" autocomplete="off">
 
-  <h2>escoamento</h2>
-  <label>Velocidade <span class="val" id="vVel">30 m/s</span></label>
+  <h2>3 · escoamento</h2>
+  <label>Velocidade<span class="dica" tabindex="0" data-dica="Corrente livre em m/s. No lattice a velocidade é sempre 0,05 (Mach baixo); o que a velocidade real muda é o tempo físico por passo, o Reynolds pedido e o arrasto em newtons, que cresce com U². A imagem é a mesma a 30 ou 90 m/s, exceto pela escala de tempo — o HUD diz quantas vezes mais lenta que o real ela está.">ⓘ</span> <span class="val" id="vVel">30 m/s</span></label>
   <input type="range" id="velocidade" min="5" max="90" step="1" value="30" autocomplete="off">
-  <label>Guinada <span class="val" id="vGuinada">0°</span></label>
+  <label>Guinada<span class="dica" tabindex="0" data-dica="Ângulo entre o vento e o eixo do carro, como vento lateral. O modelo é girado e voxelizado de novo, então a simulação recomeça.">ⓘ</span> <span class="val" id="vGuinada">0°</span></label>
   <input type="range" id="guinada" min="-20" max="20" step="1" value="0" autocomplete="off">
-  <label class="chk"><input type="checkbox" id="inverter" autocomplete="off"> inverter frente/trás</label>
+  <label class="chk"><input type="checkbox" id="inverter" autocomplete="off"> inverter frente/trás<span class="dica" tabindex="0" data-dica="O app adivinha o nariz pela altura das extremidades: o capô é mais baixo que o vidro traseiro. Se o carro estiver de ré para o vento, marque aqui.">ⓘ</span></label>
   <div id="sentido" style="color:var(--tenue);font-size:10.5px;margin:-2px 0 6px 22px"></div>
-  <label class="chk"><input type="checkbox" id="esteira" checked autocomplete="off"> esteira rolante</label>
-  <label class="chk"><input type="checkbox" id="les" checked autocomplete="off"> LES Smagorinsky</label>
+  <label class="chk"><input type="checkbox" id="esteira" checked autocomplete="off"> esteira rolante<span class="dica" tabindex="0" data-dica="O piso se move na velocidade do ar, como a esteira de um túnel automotivo: o assoalho vê chão em movimento, como na estrada. Desligada, o piso é parado e cria uma camada limite que na estrada não existe.">ⓘ</span></label>
+  <label class="chk"><input type="checkbox" id="les" checked autocomplete="off"> LES Smagorinsky<span class="dica" tabindex="0" data-dica="Modelo sub-grid: fornece a dissipação dos turbilhões menores que uma célula. Ligado é LES grosseiro, o método da CFD automotiva. Desligado, as escalas não resolvidas ficam sem modelo nenhum e os números viram apenas qualitativos.">ⓘ</span></label>
 
   <h2>medidas</h2>
-  <div class="medida"><span>C<sub>d</sub></span><b id="cd">—</b></div>
+  <div class="medida"><span>C<sub>d</sub><span class="dica" tabindex="0" data-dica="Coeficiente de arrasto: força na direção do vento dividida por ½ρU²·A. Média sobre uma janela móvel, com o desvio ao lado, corrigida por bloqueio (Maskell). Serve para comparar formas, não como Cd real do veículo: o Reynolds do lattice é muito menor que o real, e o veredito abaixo diz quanto.">ⓘ</span></span><b id="cd">—</b></div>
   <div class="erro-barra" id="cdErro">acumulando amostras…</div>
-  <div class="medida"><span>C<sub>l</sub></span><b id="cl">—</b></div>
-  <div class="medida"><span>arrasto</span><b id="arrasto">—</b></div>
-  <div class="medida"><span>área frontal</span><b id="area">—</b></div>
-  <div class="medida"><span>bloqueio</span><b id="bloqueio">—</b></div>
+  <div class="medida"><span>C<sub>l</sub><span class="dica" tabindex="0" data-dica="Coeficiente de sustentação, positivo para cima. Um carro com Cl maior que zero está sendo levantado pelo ar.">ⓘ</span></span><b id="cl">—</b></div>
+  <div class="medida"><span>arrasto<span class="dica" tabindex="0" data-dica="Cd × ½ρU² × área frontal, em newtons, na velocidade escolhida e com ar a 20 °C.">ⓘ</span></span><b id="arrasto">—</b></div>
+  <div class="medida"><span>área frontal<span class="dica" tabindex="0" data-dica="Sombra do corpo voxelizado no plano perpendicular ao vento, em células². A voxelização engorda o corpo em cerca de uma célula por lado, então ela sai maior que a geométrica — e entra no denominador do Cd.">ⓘ</span></span><b id="area">—</b></div>
+  <div class="medida"><span>bloqueio<span class="dica" tabindex="0" data-dica="Área frontal dividida pela seção do túnel. Acima de 5 % o túnel aperta o escoamento e infla o arrasto; acima de 10 % nenhuma correção é confiável. Um preset maior reduz o bloqueio.">ⓘ</span></span><b id="bloqueio">—</b></div>
   <div id="veredito">—</div>
   <button id="relatorio" class="primaria" style="margin-top:9px;width:100%" disabled
           title="disponível depois de 3 travessias do domínio e 60 amostras de Cd">📄 relatório da corrida</button>
   <div id="relatorioEstado">disponível depois de 3 travessias e 60 amostras</div>
 
   <h2>visualização</h2>
-  <label class="chk"><input type="checkbox" id="oFiletes" checked autocomplete="off"> filetes de fumaça (pente)</label>
-  <label class="chk" style="margin-left:22px"><input type="checkbox" id="oFileteCor" checked autocomplete="off"> coloridos pela velocidade do ar</label>
-  <label class="chk"><input type="checkbox" id="oFumaca" autocomplete="off"> fumaça volumétrica</label>
-  <label>Densidade da fumaça <span class="val" id="vDens">70</span></label>
+  <label class="chk"><input type="checkbox" id="oFiletes" checked autocomplete="off"> filetes de fumaça (pente)<span class="dica" tabindex="0" data-dica="Filamentos soltos por um pente de tubos a montante e levados pelo campo resolvido, como a fumaça de um túnel real. Em regime permanente coincidem com as linhas de corrente.">ⓘ</span></label>
+  <label class="chk" style="margin-left:22px"><input type="checkbox" id="oFileteCor" checked autocomplete="off"> coloridos pela velocidade do ar<span class="dica" tabindex="0" data-dica="Cor pela velocidade local |u|/U∞, na mesma paleta do Cp: onde o filete fica vermelho (ar acelerado) a carroceria ao lado fica azul (pressão baixa). A escala está no HUD. Desligado, fumaça branca de túnel.">ⓘ</span></label>
+  <label class="chk"><input type="checkbox" id="oFumaca" autocomplete="off"> fumaça volumétrica<span class="dica" tabindex="0" data-dica="Fumaça como volume, advectada pelo campo e desenhada por ray-marching. Mais realista e mais cara: uns 5 fps.">ⓘ</span></label>
+  <label>Densidade da fumaça<span class="dica" tabindex="0" data-dica="Quanta fumaça cada tubo do pente solta. Só muda a imagem, não a física.">ⓘ</span> <span class="val" id="vDens">70</span></label>
   <input type="range" id="dens" min="10" max="240" step="2" value="70" autocomplete="off">
-  <label>Colunas de filamentos <span class="val" id="vColunas">7</span></label>
+  <label>Colunas de filamentos<span class="dica" tabindex="0" data-dica="Tubos do pente na horizontal. Menos tubos saem mais grossos e leem o carro inteiro; mais tubos saem finos e mostram detalhe onde o escoamento é organizado.">ⓘ</span> <span class="val" id="vColunas">7</span></label>
   <input type="range" id="colunas" min="1" max="20" step="1" value="9" autocomplete="off">
-  <label>Linhas de filamentos <span class="val" id="vLinhas">5</span></label>
+  <label>Linhas de filamentos<span class="dica" tabindex="0" data-dica="Tubos do pente na vertical. Vale o mesmo das colunas.">ⓘ</span> <span class="val" id="vLinhas">5</span></label>
   <input type="range" id="linhas" min="1" max="14" step="1" value="6" autocomplete="off">
-  <label class="chk"><input type="checkbox" id="oRasantes" checked autocomplete="off"> rasantes de solo</label>
-  <label>Intensidade das rasantes <span class="val" id="vRasa">1,0×</span></label>
+  <label class="chk"><input type="checkbox" id="oRasantes" checked autocomplete="off"> rasantes de solo<span class="dica" tabindex="0" data-dica="Traços rentes ao chão que mostram o ar passando sob o carro e em volta das rodas.">ⓘ</span></label>
+  <label>Intensidade das rasantes<span class="dica" tabindex="0" data-dica="Brilho e alongamento dos traços rasantes. Só imagem.">ⓘ</span> <span class="val" id="vRasa">1,0×</span></label>
   <input type="range" id="rasa" min="0" max="2.5" step="0.1" value="1" autocomplete="off">
-  <label class="chk"><input type="checkbox" id="oEsteiras" autocomplete="off"> esteiras de partículas</label>
-  <label class="chk"><input type="checkbox" id="oCorpo" checked autocomplete="off"> carroceria</label>
-  <label class="chk"><input type="checkbox" id="oCp" checked autocomplete="off"> pintar C<sub>p</sub> na superfície</label>
-  <label>Ganho do C<sub>p</sub> <span class="val" id="vGanho">1,0×</span></label>
+  <label class="chk"><input type="checkbox" id="oEsteiras" autocomplete="off"> esteiras de partículas<span class="dica" tabindex="0" data-dica="Partículas espalhadas pelo domínio inteiro, coloridas pela velocidade. Boas para ver a esteira atrás do carro.">ⓘ</span></label>
+  <label class="chk"><input type="checkbox" id="oCorpo" checked autocomplete="off"> carroceria<span class="dica" tabindex="0" data-dica="Desenha ou esconde a malha do modelo. Escondida, a fumaça e as partículas continuam contornando o corpo, porque ele continua no lattice.">ⓘ</span></label>
+  <label class="chk"><input type="checkbox" id="oCp" checked autocomplete="off"> pintar C<sub>p</sub> na superfície<span class="dica" tabindex="0" data-dica="Coeficiente de pressão Cp = (p − p∞)/(½ρU²), lido do fluido encostado na superfície: vermelho na estagnação do nariz, azul onde o ar acelera e a pressão cai.">ⓘ</span></label>
+  <label>Ganho do C<sub>p</sub><span class="dica" tabindex="0" data-dica="Amplifica a escala de cor do Cp para realçar diferenças pequenas. Só imagem.">ⓘ</span> <span class="val" id="vGanho">1,0×</span></label>
   <input type="range" id="ganho" min="0.2" max="4" step="0.1" value="1" autocomplete="off">
 
   <h2>verificação</h2>
@@ -297,6 +338,38 @@
   <div id="estado"></div>
   <div id="carregando">iniciando…</div>
 </main>
+
+<div id="boasVindas" hidden role="dialog" aria-labelledby="bvTitulo">
+  <div class="caixa">
+    <h3 id="bvTitulo">Túnel de vento no navegador</h3>
+    <p>Um túnel de vento virtual que roda inteiro na GPU da sua máquina. O ar é resolvido por
+    Lattice-Boltzmann (D3Q19, TRT, LES) e <b>tudo o que aparece na tela é o campo resolvido</b>:
+    a fumaça, as partículas e as cores da carroceria leem o escoamento, não um enfeite.</p>
+    <ol>
+      <li><b>Backend.</b> Onde a física roda. WebGPU é o caminho principal; WebGL2 roda em
+      praticamente qualquer navegador, com a mesma física. Deixe o que veio escolhido, a não
+      ser que queira comparar.</li>
+      <li><b>Resolução.</b> O tamanho do túnel em células. Mais células, mais detalhe e mais
+      lento; o app já sugere a maior que cabe na sua placa. Comece pela sugerida.</li>
+      <li><b>Modelo.</b> Escolha um da lista ou carregue o seu (STL, OBJ, PLY, GLB). Ao
+      carregar, o túnel liga sozinho: primeiro acelera o vento, depois o escoamento se
+      estabelece.</li>
+    </ol>
+    <p>Depois disso, ajuste velocidade, guinada, esteira e o que aparece na imagem. Cada
+    controle tem um <span class="dica" tabindex="0" data-dica="É assim que cada dica aparece: passe o mouse ou toque no ícone.">ⓘ</span>
+    que explica o que ele faz. Arraste para girar, use a roda para chegar perto, botão
+    direito para arrastar a cena, duplo clique para recentrar.</p>
+    <p>O C<sub>d</sub> aparece no painel com a barra de erro, e depois de três travessias do
+    domínio o botão <b>relatório da corrida</b> gera um documento com selo de validade. Os
+    números são <b>qualitativos</b>: o Reynolds que o lattice resolve é muito menor que o de um
+    carro real, e o painel diz os dois. Serve para ver onde o ar separa e comparar formas,
+    não para prever consumo.</p>
+    <div class="rodape">
+      <label class="chk" style="margin:0"><input type="checkbox" id="naoMostrar" autocomplete="off"> não mostrar de novo</label>
+      <button id="comecar" class="primaria" type="button">começar →</button>
+    </div>
+  </div>
+</div>
 
 <script type="module">
 import { sondar, PRESETS, presetsPara, presetInicial } from './src/backend/caps.js';
@@ -535,6 +608,14 @@ for (const p of cabem) {
 selPreset.value = (presetInicial(usado) ?? cabem[0]).id;
 
 const selModelo = $('modelo');
+/* Nenhum modelo vem carregado: a primeira opção é o convite. Quem abre o app
+   escolhe backend e resolução com o túnel vazio, e o modelo é o último passo —
+   é ele que liga a simulação. */
+{
+  const o = document.createElement('option');
+  o.value = ''; o.textContent = 'escolha um modelo…'; o.disabled = true;
+  selModelo.appendChild(o);
+}
 for (const m of MODELOS) {
   const o = document.createElement('option');
   o.value = m.id; o.textContent = m.nome;
@@ -543,7 +624,7 @@ for (const m of MODELOS) {
 /* Explícito: um <select> populado por script depois do load ainda pode receber
    o valor restaurado pelo navegador, e aí a interface diz um modelo e o app
    carrega outro. */
-selModelo.value = MODELOS[0].id;
+selModelo.value = '';
 
 /* ────────────────────────────────────────────────────────────── montagem */
 
@@ -614,7 +695,9 @@ async function carregarModelo(fonte, nome) {
 let montando = false;
 
 async function montar() {
-  if (montando) return;
+  /* Sem modelo não há o que montar: trocar preset, guinada ou esteira antes
+     de escolher um só ajusta o controle, e o valor é lido na montagem. */
+  if (montando || !app.malha) return;
   montando = true;
   try { await _montar(); } finally { montando = false; }
 }
@@ -931,9 +1014,17 @@ $('reiniciar').onclick = () => {
 /* Fecha a gaveta no que remonta o domínio: a barra de progresso e o "voxelizando"
    aparecem no meio do canvas, e no celular metade disso fica atrás do painel. */
 const recolher = () => { if (ehMovel.matches) abrirPainel(false); };
-selPreset.onchange = () => { recolher(); montar(); };
+/* O tamanho ao lado do seletor vale antes de haver modelo: é o que a pessoa
+   está escolhendo. */
+const mostrarPreset = () => {
+  const p = PRESETS.find(x => x.id === selPreset.value);
+  if (p) $('vPreset').textContent = `${(p.cells / 1e6).toFixed(2)}M céls`;
+};
+mostrarPreset();
+selPreset.onchange = () => { mostrarPreset(); recolher(); montar(); };
 selModelo.onchange = () => {
   const m = MODELOS.find(x => x.id === selModelo.value);
+  if (!m) return;
   $('comprimento').value = m.comprimento;
   recolher();
   carregarModelo(m.id, m.id);
@@ -1013,8 +1104,56 @@ function calibrarSubpassos() {
 selPreset.addEventListener('change', calibrarSubpassos);
 
 window.__app = app;   /* gancho de depuracao */
-await carregarModelo(MODELOS[0].id, MODELOS[0].id);
+
+/*
+ * Nada carregado na entrada. O túnel fica vazio até o modelo ser escolhido —
+ * e é o modelo, não a página, que liga a simulação. O convite fica no lugar
+ * onde a cena vai aparecer.
+ */
+$('carregando').innerHTML = ehMovel.matches
+  ? 'toque em <b>⚙ controles</b> e escolha um modelo para começar'
+  : 'escolha um modelo no painel para começar';
+$('estado').textContent = '';
 calibrarSubpassos();
 laco();
+
+/*
+ * Boas-vindas: o passo a passo antes de qualquer coisa rodar. Aparece a cada
+ * entrada, a não ser que a pessoa peça para não — a escolha vale para este
+ * navegador e o botão "? ajuda" traz a caixa de volta a qualquer hora.
+ */
+const CHAVE_BV = 'cfd2026.boasVindas';
+const lerBV = () => { try { return localStorage.getItem(CHAVE_BV); } catch { return null; } };
+function mostrarBoasVindas() {
+  $('naoMostrar').checked = lerBV() === 'nao';
+  $('boasVindas').hidden = false;
+  $('comecar').focus();
+}
+function fecharBoasVindas() {
+  try { localStorage.setItem(CHAVE_BV, $('naoMostrar').checked ? 'nao' : 'sim'); } catch { /* sem storage */ }
+  $('boasVindas').hidden = true;
+}
+$('comecar').onclick = fecharBoasVindas;
+$('ajuda').onclick = mostrarBoasVindas;
+
+/*
+ * As dicas abrem no hover e no foco pelo CSS; o clique/toque alterna por
+ * classe, para o celular e para quem prefere clicar. O preventDefault é o
+ * que importa: um ⓘ dentro de um <label> de checkbox, sem ele, marcaria e
+ * desmarcaria a caixa a cada toque na dica.
+ */
+const fecharDicas = () => document.querySelectorAll('.dica.aberta').forEach(x => x.classList.remove('aberta'));
+for (const d of document.querySelectorAll('.dica')) {
+  d.addEventListener('click', e => {
+    e.preventDefault(); e.stopPropagation();
+    const ja = d.classList.contains('aberta');
+    fecharDicas();
+    if (!ja) d.classList.add('aberta');
+  });
+}
+addEventListener('pointerdown', e => { if (!e.target.closest?.('.dica')) fecharDicas(); }, true);
+$('boasVindas').addEventListener('click', e => { if (e.target === $('boasVindas')) fecharBoasVindas(); });
+addEventListener('keydown', e => { if (e.key === 'Escape' && !$('boasVindas').hidden) fecharBoasVindas(); });
+if (lerBV() !== 'nao') mostrarBoasVindas();
 </script>
 </html>

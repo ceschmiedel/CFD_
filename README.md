@@ -46,7 +46,10 @@ navegador nunca carregou.
 A interface se adapta: o painel de controle vira uma gaveta atrás do botão
 **⚙ controles**, a visualização fica com a tela inteira e o C<sub>d</sub> sobe
 para o canto superior, que está sempre à vista. Um dedo arrastando gira a
-câmera, dois dedos aproximam e afastam.
+câmera, dois dedos aproximam, afastam e arrastam a cena, toque duplo volta ao
+enquadramento do corpo. No desktop a roda aproxima do ponto sob o cursor, o
+botão direito (ou Shift) arrasta e o duplo clique recentra — e dá para chegar
+a três centésimos do domínio, que num carro de 0,2 é encostar no retrovisor.
 
 A resolução inicial é escolhida mais baixa em telas pequenas — uma GPU móvel
 passa nos limites declarados de presets que ela não consegue avançar em tempo

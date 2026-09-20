@@ -29,7 +29,7 @@
  * cor é copiada para o canvas.
  */
 
-import { Orbita, inversa } from '../mat4.js';
+import { Orbita, inversa, ligarOrbita } from '../mat4.js';
 import { CENA, TURBO, PRECISAO, VS_COBERTURA, programa, textura2D } from './comum.js';
 import { VolumeFumacaGL } from './fumaca.js';
 
@@ -338,43 +338,7 @@ export class RendererWebGL2 {
    * primeiro e a cena saltaria a cada toque.
    */
   _ligarInteracao() {
-    const c = this.canvas;
-    const ativos = new Map();
-    const sep = () => {
-      const [a, b] = [...ativos.values()];
-      return Math.hypot(a.x - b.x, a.y - b.y);
-    };
-    let dist0 = 0;
-
-    c.addEventListener('pointerdown', e => {
-      ativos.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      c.setPointerCapture(e.pointerId);
-      if (ativos.size === 2) dist0 = sep();
-    });
-    const soltar = e => {
-      ativos.delete(e.pointerId);
-      if (ativos.size === 2) dist0 = sep();
-    };
-    c.addEventListener('pointerup', soltar);
-    c.addEventListener('pointercancel', soltar);
-
-    c.addEventListener('pointermove', e => {
-      const p = ativos.get(e.pointerId);
-      if (!p) return;
-      const dx = e.clientX - p.x, dy = e.clientY - p.y;
-      p.x = e.clientX; p.y = e.clientY;
-      if (ativos.size === 1) {
-        this.camera.girar(dx * 0.008, dy * 0.008);
-      } else if (ativos.size === 2 && dist0 > 0) {
-        const d = sep();
-        if (d > 0) { this.camera.aproximar(dist0 / d); dist0 = d; }
-      }
-    });
-
-    c.addEventListener('wheel', e => {
-      e.preventDefault();
-      this.camera.aproximar(Math.exp(e.deltaY * 0.0011));
-    }, { passive: false });
+    ligarOrbita(this.canvas, this.camera);
   }
 
   /* ───────────────────────────────────────────────────────────── montagem */
@@ -488,6 +452,8 @@ export class RendererWebGL2 {
     ];
     const diag = Math.hypot(...extentos.tamanho) * k;
     this.camera.distancia = Math.max(0.5, diag * 1.9);
+    /* O que o duplo clique restaura. */
+    this.camera.padrao = { alvo: this.camera.alvo.slice(), distancia: this.camera.distancia };
     this.fumaca?.posicionarRake(extentos);
     if (this.rasantes) {
       const alturaCorpo = Math.max(extentos.tamanho[2], 4);

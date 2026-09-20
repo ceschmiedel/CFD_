@@ -40,7 +40,7 @@
  * dentro de uma caixa.
  */
 
-import { Orbita, inversa } from './mat4.js';
+import { Orbita, inversa, ligarOrbita } from './mat4.js';
 import { CENA, TURBO, CENA_BYTES } from './comum.js';
 import { VolumeFumaca } from './fumaca.js';
 import { Rasantes } from './rasante.js';
@@ -278,50 +278,7 @@ export class Renderer {
    * junto com o zoom.
    */
   _ligarInteracao() {
-    const c = this.canvas;
-    const ativos = new Map();
-    let separacao = 0;
-
-    const distancia = () => {
-      const [a, b] = [...ativos.values()];
-      return Math.hypot(a.x - b.x, a.y - b.y);
-    };
-
-    c.addEventListener('pointerdown', e => {
-      ativos.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      c.setPointerCapture(e.pointerId);
-      if (ativos.size === 2) separacao = distancia();
-    });
-
-    const soltar = e => {
-      ativos.delete(e.pointerId);
-      /* Tirar um dedo de uma pinça deixa o outro arrastando. Sem zerar isto, o
-         primeiro pointermove seguinte compararia a separação de dois dedos com
-         nada e daria um salto de zoom. */
-      if (ativos.size === 2) separacao = distancia(); else separacao = 0;
-    };
-    c.addEventListener('pointerup', soltar);
-    c.addEventListener('pointercancel', soltar);
-
-    c.addEventListener('pointermove', e => {
-      const p = ativos.get(e.pointerId);
-      if (!p) return;
-      const dx = e.clientX - p.x, dy = e.clientY - p.y;
-      p.x = e.clientX; p.y = e.clientY;
-
-      if (ativos.size === 1) {
-        this.camera.girar(dx * 0.008, dy * 0.008);
-      } else if (ativos.size === 2) {
-        const d = distancia();
-        if (separacao > 0 && d > 0) this.camera.aproximar(separacao / d);
-        separacao = d;
-      }
-    });
-
-    c.addEventListener('wheel', e => {
-      e.preventDefault();
-      this.camera.aproximar(Math.exp(e.deltaY * 0.0011));
-    }, { passive: false });
+    ligarOrbita(this.canvas, this.camera);
   }
 
   /** Prepara pipelines para um solver — refeito quando a resolução muda. */
@@ -470,6 +427,8 @@ export class Renderer {
     ];
     const diag = Math.hypot(...extentos.tamanho) * k;
     this.camera.distancia = Math.max(0.5, diag * 1.9);
+    /* O que o duplo clique restaura. */
+    this.camera.padrao = { alvo: this.camera.alvo.slice(), distancia: this.camera.distancia };
     this.fumaca?.posicionarRake(extentos);
     this.rasantes?.posicionarFaixa(extentos);
     this.filetes?.posicionarRake(extentos);

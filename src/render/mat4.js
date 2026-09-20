@@ -145,9 +145,81 @@ export class Orbita {
     this.polar = Math.min(Math.PI - 0.02, Math.max(0.02, this.polar + dPol));
   }
 
+  /*
+   * O piso de distância é 0,03 num mundo em que o carro tem 0,2 de
+   * comprimento: dá para encostar num retrovisor. Era 0,4 — duas vezes o
+   * carro —, e "aproximar" parava a uma distância em que o carro inteiro cabia
+   * na tela com folga, que é o oposto de olhar de perto.
+   */
   aproximar(fator) {
-    this.distancia = Math.min(60, Math.max(0.4, this.distancia * fator));
+    this.distancia = Math.min(60, Math.max(0.03, this.distancia * fator));
   }
+
+  /**
+   * Aproxima MANTENDO O PONTO SOB O CURSOR PARADO, que é o que se espera de
+   * uma roda de mouse: o que se quer ver de perto é o que está debaixo do
+   * ponteiro, não o centro da tela.
+   *
+   * O ponto é tomado no plano focal — o plano que passa pelo alvo e é
+   * perpendicular ao olhar. `ox`, `oy` são o deslocamento do cursor em pixels
+   * a partir do centro da janela, y para baixo.
+   */
+  aproximarEm(fator, ox, oy, alturaPx, aspecto) {
+    const antes = this.distancia;
+    this.aproximar(fator);
+    const f = this.distancia / antes;
+    const mpp = 2 * Math.tan(this.fov(aspecto) / 2) * antes / alturaPx;
+    const { direita, cima } = this.base();
+    for (let i = 0; i < 3; i++) {
+      this.alvo[i] += (direita[i] * ox - cima[i] * oy) * mpp * (1 - f);
+    }
+  }
+
+  /**
+   * Arrasta o alvo no plano da tela: a cena segue o ponteiro. `dx`, `dy` em
+   * pixels, y para baixo.
+   */
+  deslocar(dx, dy, alturaPx, aspecto) {
+    const mpp = 2 * Math.tan(this.fov(aspecto) / 2) * this.distancia / alturaPx;
+    const { direita, cima } = this.base();
+    for (let i = 0; i < 3; i++) {
+      this.alvo[i] += (-direita[i] * dx + cima[i] * dy) * mpp;
+    }
+  }
+
+  /** Volta ao enquadramento guardado por `enquadrar`, se houver. */
+  recentrar() {
+    if (!this.padrao) return;
+    this.alvo = this.padrao.alvo.slice();
+    this.distancia = this.padrao.distancia;
+  }
+
+  /** Vetores "direita" e "cima" da câmera, em mundo. */
+  base() {
+    const o = this.olho, a = this.alvo;
+    const f = [a[0] - o[0], a[1] - o[1], a[2] - o[2]];
+    const nf = Math.hypot(...f) || 1;
+    for (let i = 0; i < 3; i++) f[i] /= nf;
+    /* direita = frente × z */
+    const d = [f[1], -f[0], 0];
+    const nd = Math.hypot(...d) || 1;
+    for (let i = 0; i < 3; i++) d[i] /= nd;
+    /* cima = direita × frente */
+    const c = [
+      d[1] * f[2] - d[2] * f[1],
+      d[2] * f[0] - d[0] * f[2],
+      d[0] * f[1] - d[1] * f[0],
+    ];
+    return { frente: f, direita: d, cima: c };
+  }
+
+  /**
+   * O plano próximo acompanha a distância. Fixo em 0,05 ele cortava o carro
+   * ao meio assim que a câmera chegava perto; fixo em 0,002 ele gastaria a
+   * precisão do z-buffer na parede de trás quando a câmera está longe. Dois
+   * por cento da distância, entre esses limites, serve aos dois casos.
+   */
+  get perto() { return Math.min(0.05, Math.max(0.002, this.distancia * 0.02)); }
 
   /**
    * O campo de visão desta câmera, dado o formato da janela.
@@ -173,7 +245,7 @@ export class Orbita {
   /** Profundidade em [-1,1], para o caminho WebGL2. */
   matrizGL(aspecto) {
     return multiplicar(
-      perspectivaGL(this.fov(aspecto), aspecto, 0.05, 200),
+      perspectivaGL(this.fov(aspecto), aspecto, this.perto, 200),
       olharPara(this.olho, this.alvo, [0, 0, 1]));
   }
 
@@ -183,7 +255,88 @@ export class Orbita {
        objeto cabe — ver fov(). O teto de 2 rad evita a distorção grotesca de
        uma janela muito estreita. */
     return multiplicar(
-      perspectiva(this.fov(aspecto), aspecto, 0.05, 200),
+      perspectiva(this.fov(aspecto), aspecto, this.perto, 200),
       olharPara(this.olho, this.alvo, [0, 0, 1]));
   }
+}
+
+/**
+ * Liga os gestos de câmera a um canvas. Uma vez, para os dois backends: um
+ * gesto que gira num e desloca no outro é o tipo de diferença que ninguém
+ * documenta e todo mundo sente.
+ *
+ *   um ponteiro                    gira
+ *   botão direito, do meio, Shift  arrasta a cena
+ *   roda                           aproxima do ponto sob o cursor
+ *   dois dedos                     pinça aproxima; mover os dois arrasta
+ *   duplo clique / toque duplo     volta ao enquadramento do corpo
+ *
+ * Os ponteiros ativos ficam num mapa, e não num par de variáveis, porque no
+ * celular a roda não existe: sem pinça não há como aproximar. Rastrear cada
+ * pointerId separadamente é o que distingue "um dedo arrastando" de "dois
+ * dedos abrindo". Com dois dedos a rotação é suspensa — aplicar o giro de cada
+ * um faria a câmera cambalear junto com o zoom.
+ */
+export function ligarOrbita(c, camera) {
+  const ativos = new Map();
+  let separacao = 0;
+  const aspecto = () => c.clientWidth / Math.max(1, c.clientHeight);
+  const altura = () => Math.max(1, c.clientHeight);
+  const distancia = () => {
+    const [a, b] = [...ativos.values()];
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  };
+
+  c.addEventListener('pointerdown', e => {
+    ativos.set(e.pointerId, { x: e.clientX, y: e.clientY, botao: e.button, shift: e.shiftKey });
+    /* Um evento sintético (teste, automação) não tem ponteiro ativo e a
+       captura lança; o gesto funciona igual sem ela. */
+    try { c.setPointerCapture(e.pointerId); } catch { /* sem captura */ }
+    if (ativos.size === 2) separacao = distancia();
+  });
+
+  const soltar = e => {
+    ativos.delete(e.pointerId);
+    /* Tirar um dedo de uma pinça deixa o outro arrastando. Sem zerar isto, o
+       primeiro pointermove seguinte compararia a separação de dois dedos com
+       nada e daria um salto de zoom. */
+    if (ativos.size === 2) separacao = distancia(); else separacao = 0;
+  };
+  c.addEventListener('pointerup', soltar);
+  c.addEventListener('pointercancel', soltar);
+
+  c.addEventListener('pointermove', e => {
+    const p = ativos.get(e.pointerId);
+    if (!p) return;
+    const dx = e.clientX - p.x, dy = e.clientY - p.y;
+    p.x = e.clientX; p.y = e.clientY;
+
+    if (ativos.size === 1) {
+      if (p.botao === 2 || p.botao === 1 || p.shift || e.shiftKey) {
+        camera.deslocar(dx, dy, altura(), aspecto());
+      } else {
+        camera.girar(dx * 0.008, dy * 0.008);
+      }
+    } else if (ativos.size === 2) {
+      /* Os dois dedos juntos: a separação aproxima, o ponto médio arrasta.
+         Cada pointermove traz um dedo só, então o médio anda metade do que
+         este dedo andou. */
+      const d = distancia();
+      if (separacao > 0 && d > 0) camera.aproximar(separacao / d);
+      separacao = d;
+      camera.deslocar(dx * 0.5, dy * 0.5, altura(), aspecto());
+    }
+  });
+
+  c.addEventListener('wheel', e => {
+    e.preventDefault();
+    const r = c.getBoundingClientRect();
+    const ox = e.clientX - (r.left + r.width / 2);
+    const oy = e.clientY - (r.top + r.height / 2);
+    camera.aproximarEm(Math.exp(e.deltaY * 0.0011), ox, oy, altura(), aspecto());
+  }, { passive: false });
+
+  /* O botão direito é arrastar, não menu. */
+  c.addEventListener('contextmenu', e => e.preventDefault());
+  c.addEventListener('dblclick', () => camera.recentrar());
 }

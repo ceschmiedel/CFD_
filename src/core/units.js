@@ -76,20 +76,37 @@ export const AR = {
  *     ω = 1,92   estável nos dois casos, mas |u|max chega a 4x a corrente livre
  *     ω = 1,90   estável nos dois casos, |u|max em 2,1x — que é escoamento
  *
- * 1,90 é a escolha: 1,92 sobrevive, e um pico de quatro vezes a corrente livre
- * em volta de um carro não é escoamento, é o solver já tocando os modos que
- * vão matá-lo mais adiante.
+ * 1,90 foi a primeira escolha: 1,92 sobrevive, e um pico de quatro vezes a
+ * corrente livre em volta de um carro não é escoamento, é o solver já tocando
+ * os modos que vão matá-lo mais adiante.
  *
- * A conta que isso custa está em `verdict`, e é grande: ν sobe 5,2 vezes e o
- * Reynolds resolvido cai na mesma proporção, de ~5,3e3 para ~1,0e3. É o preço
- * honesto de um número que não diverge.
+ * SÓ QUE "NÃO DIVERGE" NÃO É "ESTÁ ESTACIONÁRIO". A tabela acima procura NaN
+ * e |u|max, e nenhum dos dois acusa um modo de PERÍODO 2: o campo alternando
+ * entre dois estados a cada passo, sem crescer e sem morrer. Ele existe a
+ * ω = 1,90 no canto entre a esteira e a face frontal do corpo — sobre-relaxação
+ * a ω ≈ 2 num ponto de estagnação alimentado pelo piso em movimento — com
+ * |Δu| de 0,047 entre passos consecutivos contra 0,05 de corrente livre, e
+ * fazia a força lida num só estado alternar entre +2,93 e −1,62. Medido
+ * (tests/paridade.html, cubo de referência sobre a esteira):
+ *
+ *     ω = 1,90   amplitude 2,27 na força, |Δu| 4,7e-2 entre passos
+ *     ω = 1,85   amplitude 0,003,        |Δu| 8e-4
+ *     ω = 1,80   zero
+ *     Λ = 1/4    piora (2,92); um anel de piso parado sob o corpo não resolve
+ *
+ * 1,85 é o teto. O kernel de forças já soma os dois estados e não depende do
+ * modo, mas um campo que oscila 70% da corrente livre num canto não é o
+ * escoamento que se quer mostrar. Custa mais 35% de Reynolds resolvido: ν
+ * sobe 8,0 vezes em relação a 1,98 e o Re do lattice cai de ~5,3e3 para
+ * ~6,7e2 — e para um carro a 32 células, de ~180 para ~120. A esta distância
+ * do Re real, isso não muda a classe de validade de nada.
  *
  * A esteira NÃO compra teto aqui, ao contrário do que a versão anterior
  * supunha. Ela continua valendo por física — o assoalho vê chão em movimento,
  * como na estrada — mas não por estabilidade.
  */
-export const OMEGA_MAX = 1.90;
-export const OMEGA_MAX_PISO_PARADO = 1.90;
+export const OMEGA_MAX = 1.85;
+export const OMEGA_MAX_PISO_PARADO = 1.85;
 
 export const NU_MIN = nuFromOmega(OMEGA_MAX);
 

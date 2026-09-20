@@ -328,6 +328,29 @@ export function shaderInit({ nbuf = 1 } = {}) {
  * lado do corpo e é uma contribuição legítima e diferente. Esquecer o termo dá
  * um Cd plausível e errado por um fator constante, que é o pior tipo de erro
  * porque sobrevive a toda inspeção visual.
+ *
+ * DOIS ESTADOS, NÃO O DOBRO DE UM
+ * -------------------------------
+ * Com bounce-back no nó de fluido e parede parada, o que volta é exatamente o
+ * que saiu: f_ī(x, t) = f_i^pc(x, t-1). A versão anterior usava isso para ler
+ * UMA população e dobrar — 2 f_i^pc(x, t), do buffer que o passo acabou de
+ * escrever. Algebricamente idêntico num escoamento estacionário; na prática,
+ * não: medido com o cubo de referência sobre a esteira a ω = 1,90, a força por
+ * passo alternava entre +2,93 e −1,62 conforme a paridade do passo, com cada
+ * paridade constante até a quarta casa por centenas de passos. O campo tem um
+ * modo numérico de período 2 — sobre-relaxação a ω ≈ 2 num ponto de
+ * estagnação alimentado pelo piso em movimento, no canto entre a esteira e a
+ * face frontal do corpo, onde |Δu| entre passos consecutivos chega a 0,047
+ * contra 0,05 de corrente livre. Ele some com o piso parado e a ω ≤ 1,85, e
+ * Λ = 1/4 o piora (tests/paridade.html mede tudo isso).
+ *
+ * Este kernel lê os DOIS buffers: `src`, que é f^pc(t), e `dst`, que ainda
+ * guarda f^pc(t-1) — ou seja, a população que acabou de voltar da parede. A
+ * soma f_i^pc(t) + f_ī(t) é a troca de momento centrada em t-1/2, e um modo
+ * de período 2 se cancela nela por construção. O que sobra em `.w` é a metade
+ * da diferença entre os dois estados, projetada em x: a amplitude do modo,
+ * que o solver devolve como `oscilacaoForca` e a interface mostra. Zero num
+ * escoamento sem o modo; ±100% da força no caso acima.
  */
 export function shaderForcas({ nbuf = 1 } = {}) {
   const plano = planoDeBuffers(nbuf);
@@ -347,6 +370,7 @@ export function shaderForcas({ nbuf = 1 } = {}) {
   L.push('        @builtin(workgroup_id) wid: vec3<u32>,');
   L.push('        @builtin(num_workgroups) nwg: vec3<u32>) {');
   L.push('  var f = vec3<f32>(0.0, 0.0, 0.0);');
+  L.push('  var osc = 0.0;   // amplitude da alternância entre os dois estados, em x');
   L.push('  let dentro = gid.x < P.dim.x && gid.y < P.dim.y && gid.z < P.dim.z;');
   L.push('');
   L.push('  if (dentro) {');
@@ -364,16 +388,21 @@ export function shaderForcas({ nbuf = 1 } = {}) {
     /* SOMENTE o corpo. O piso e as paredes do túnel refletem igual mas não
      * entram na conta — ver o cabeçalho de CELULA em ir.js. */
     L.push(`        if (tb == ${TIPO.SOLIDO}u) {`);
-    /* Com bounce-back no nó de fluido, o que volta é exatamente o que saiu
-     * (a parede do corpo é estática), então a soma dos dois é o dobro do que
-     * saiu — e o kernel não lê nenhuma população dentro do sólido. */
-    L.push(`          let q = 2.0 * (${d.lerPop(i, 'cell')} + ${num(W[i])});`);
+    /* O que sai agora (src = f^pc(t)) mais o que acabou de voltar da parede
+     * (dst = f^pc(t-1), que é f_ī(t) por bounce-back). Ver o cabeçalho: não é
+     * o dobro de um, é a soma dos dois — e nada aqui lê dentro do sólido. */
+    L.push(`          let qs = ${d.lerPop(i, 'cell')} + ${num(W[i])};`);
+    L.push(`          let qa = ${d.lerPopDst(i)} + ${num(W[i])};`);
+    L.push(`          let q = qs + qa;`);
     const termos = [];
     for (let a = 0; a < 3; a++) {
       if (c[a] === 0) { termos.push('0.0'); continue; }
       termos.push(c[a] > 0 ? 'q' : '-q');
     }
     L.push(`          f += vec3<f32>(${termos.join(', ')});`);
+    /* Σ c_ix (qs − qa) é a metade da diferença entre as forças que cada
+     * estado daria sozinho — a amplitude da alternância que se via. */
+    if (c[0] !== 0) L.push(`          osc += ${c[0] > 0 ? '' : '-'}(qs - qa);`);
     L.push(`        }`);
     L.push(`      }`);
   }
@@ -382,7 +411,7 @@ export function shaderForcas({ nbuf = 1 } = {}) {
   L.push('  }');
   L.push('');
   L.push('  // redução em árvore dentro do workgroup: 64 valores viram 1');
-  L.push('  sh[lid] = vec4<f32>(f, 0.0);');
+  L.push('  sh[lid] = vec4<f32>(f, osc);');
   L.push('  workgroupBarrier();');
   for (let s = 32; s > 0; s >>= 1) {
     L.push(`  if (lid < ${s}u) { sh[lid] = sh[lid] + sh[lid + ${s}u]; }`);

@@ -378,13 +378,18 @@ export class SolverWebGL2 {
     return t * t * (3 - 2 * t);
   }
 
-  /** Preenche o domínio com o equilíbrio da corrente livre. */
+  /**
+   * Preenche o domínio com o equilíbrio da corrente livre — nos DOIS
+   * conjuntos, porque o passe de forças lê o atual e o anterior (ver
+   * shaderForcas em glsl.js) e o anterior não pode ser lixo na partida.
+   */
   inicializar() {
     const gl = this.gl;
-    /* Init lê A e escreve B, como no WebGPU — a frente passa a ser B. */
+    /* Init escreve B e depois A; a frente passa a ser B, como no WebGPU. */
     this.frente = 'A';
     this._ligarUniformes(this.progInit);
     this._desenhar(this.fboB, this.atlas.w, this.atlas.h, N_ALVOS);
+    this._desenhar(this.fboA, this.atlas.w, this.atlas.h, N_ALVOS);
     this.frente = 'B';
     this.passos = 0;
     if (this._rampa) this._rampa.atual = 0;
@@ -419,10 +424,12 @@ export class SolverWebGL2 {
     }
 
     const gl = this.gl;
-    const alvo = this.frente === 'A' ? this.popA : this.popB;
-    for (let i = 0; i < N_ALVOS; i++) {
-      gl.bindTexture(gl.TEXTURE_2D, alvo[i]);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.FLOAT, dados[i]);
+    /* Nos dois conjuntos, pelo mesmo motivo de inicializar(). */
+    for (const alvo of [this.popA, this.popB]) {
+      for (let i = 0; i < N_ALVOS; i++) {
+        gl.bindTexture(gl.TEXTURE_2D, alvo[i]);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.FLOAT, dados[i]);
+      }
     }
     this.passos = 0;
   }
@@ -531,6 +538,13 @@ export class SolverWebGL2 {
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboForca);
     gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
     this._ligarUniformes(this.progForcas);
+    /* O outro conjunto — f^pc(t-1) — nas unidades seguintes às do tipo. */
+    const anterior = this.frente === 'A' ? this.popB : this.popA;
+    for (let i = 0; i < N_ALVOS; i++) {
+      gl.activeTexture(gl.TEXTURE0 + N_ALVOS + 1 + i);
+      gl.bindTexture(gl.TEXTURE_2D, anterior[i]);
+      gl.uniform1i(this.progForcas.u[`uAnt${i}`], N_ALVOS + 1 + i);
+    }
     this._desenhar(this.fboForca, this.atlas.w, this.atlas.h, 1);
 
     const { p, u } = this.progReduzir;
@@ -552,6 +566,8 @@ export class SolverWebGL2 {
     gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, this.leitura);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
+    /* Amplitude do modo de período 2, como no WebGPU — ver lá. */
+    this.oscilacaoForca = this.leitura[3];
     const o = this.offsetForca ?? [0, 0, 0];
     return [this.leitura[0] - o[0], this.leitura[1] - o[1], this.leitura[2] - o[2]];
   }

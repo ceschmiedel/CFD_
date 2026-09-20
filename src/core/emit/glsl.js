@@ -400,15 +400,21 @@ export function shaderMacros() {
  *
  *     dF = c_i [ f_i(x_f) + f_ī(x_s) ]
  *
- * e com bounce-back no nó de fluido o que volta é o que saiu, então a soma é o
- * dobro. ISTO INCLUI O ATRITO VISCOSO, que é a razão de o método ser este e
- * não integração de pressão: não precisa de normal reconstruída de uma escada
- * de voxels e entrega pressão e cisalhamento juntos.
+ * ISTO INCLUI O ATRITO VISCOSO, que é a razão de o método ser este e não
+ * integração de pressão: não precisa de normal reconstruída de uma escada de
+ * voxels e entrega pressão e cisalhamento juntos.
  *
  * O termo `2 w_i c_i` das populações deslocadas NÃO cancela — ele só
  * cancelaria somado sobre o par oposto inteiro, e um link é um só. Esquecê-lo
  * dá um Cd plausível e errado por um fator constante, que sobrevive a qualquer
  * inspeção visual.
+ *
+ * Os DOIS conjuntos de texturas entram: `uSrc` é f^pc(t) e `uAnt` é f^pc(t-1),
+ * que por bounce-back é a população que acabou de voltar da parede. Somar os
+ * dois em vez de dobrar um centra a medida em t-1/2 e cancela o modo de
+ * período 2 que o campo tem a ω = 1,90 no canto entre a esteira e o corpo — a
+ * explicação inteira está no cabeçalho de shaderForcas em wgsl.js. A metade da
+ * diferença entre os dois estados, em x, vai no `.w`: é a amplitude do modo.
  *
  * A soma dos fragmentos é feita depois, pela pirâmide de `shaderReduzir` — o
  * WebGL2 não tem memória compartilhada de workgroup nem atômico de float.
@@ -417,6 +423,7 @@ export function shaderForcas() {
   const plano = planoDeTexturas();
   const L = [];
   L.push(...preambulo());
+  for (let t = 0; t < N_ALVOS; t++) L.push(`uniform sampler2D uAnt${t};   // o outro conjunto: f^pc(t-1)`);
   L.push('');
   L.push('/* GERADO por src/core/emit/glsl.js */');
   L.push('layout(location = 0) out vec4 oForca;');
@@ -425,6 +432,7 @@ export function shaderForcas() {
   L.push(...decodificarCelula());
   L.push('');
   L.push('  vec3 f = vec3(0.0);');
+  L.push('  float osc = 0.0;');
   L.push(`  if (tipoEm(cell) == ${TIPO.FLUIDO}u) {`);
   for (let i = 1; i < Q; i++) {          // i = 0 não cruza superfície nenhuma
     const c = C[i];
@@ -437,19 +445,21 @@ export function shaderForcas() {
      * conta — um piso contabilizado tem nx*ny células de superfície contra
      * alguns milhares do corpo, e o que sai é o arrasto do CHÃO. */
     L.push(`      if (tipoEm(nb) == ${TIPO.SOLIDO}u) {`);
-    L.push(`        float q = 2.0 * (texelFetch(uSrc${textura}, cell, 0)[${componente}]` +
-      ` + ${num(W[i])});`);
+    L.push(`        float qs = texelFetch(uSrc${textura}, cell, 0)[${componente}] + ${num(W[i])};`);
+    L.push(`        float qa = texelFetch(uAnt${textura}, cell, 0)[${componente}] + ${num(W[i])};`);
+    L.push('        float q = qs + qa;');
     const termos = [];
     for (let a = 0; a < 3; a++) {
       if (c[a] === 0) { termos.push('0.0'); continue; }
       termos.push(c[a] > 0 ? 'q' : '-q');
     }
     L.push(`        f += vec3(${termos.join(', ')});`);
+    if (c[0] !== 0) L.push(`        osc += ${c[0] > 0 ? '' : '-'}(qs - qa);`);
     L.push('      }');
     L.push('    }');
   }
   L.push('  }');
-  L.push('  oForca = vec4(f, 0.0);');
+  L.push('  oForca = vec4(f, osc);');
   L.push('}');
   return L.join('\n');
 }

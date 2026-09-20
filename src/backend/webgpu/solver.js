@@ -334,13 +334,24 @@ export class SolverWebGPU {
     return t * t * (3 - 2 * t);
   }
 
-  /** Preenche o domínio com o equilíbrio da corrente livre. */
+  /**
+   * Preenche o domínio com o equilíbrio da corrente livre.
+   *
+   * Nos DOIS conjuntos. O kernel de forças lê o estado atual e o anterior
+   * (ver shaderForcas), e uma medida logo depois da partida — antes de
+   * qualquer passo — encontraria no outro conjunto o que houvesse ali: zeros
+   * na primeira montagem, o caso anterior numa remontagem. Um dispatch a mais
+   * na partida custa nada e deixa os dois lados dizendo a mesma coisa.
+   */
   inicializar() {
     const enc = this.device.createCommandEncoder();
     const p = enc.beginComputePass();
     p.setPipeline(this.pipeInit);
+    const gx = Math.ceil(this.nx / 64);
     p.setBindGroup(0, this.grupoAB);   // init escreve em dst = B
-    p.dispatchWorkgroups(Math.ceil(this.nx / 64), this.ny, this.nz);
+    p.dispatchWorkgroups(gx, this.ny, this.nz);
+    p.setBindGroup(0, this.grupoBA);   // e em dst = A
+    p.dispatchWorkgroups(gx, this.ny, this.nz);
     p.end();
     this.device.queue.submit([enc.finish()]);
     this.frente = 'B';
@@ -381,9 +392,11 @@ export class SolverWebGPU {
       }
     }
 
-    const alvo = this.frente === 'A' ? this.popA : this.popB;
-    for (let i = 0; i < this.nbuf; i++) {
-      this.device.queue.writeBuffer(alvo[i], 0, dados[i]);
+    /* Nos dois conjuntos, pelo mesmo motivo de inicializar(). */
+    for (const alvo of [this.popA, this.popB]) {
+      for (let i = 0; i < this.nbuf; i++) {
+        this.device.queue.writeBuffer(alvo[i], 0, dados[i]);
+      }
     }
     this.passos = 0;
   }
@@ -503,6 +516,10 @@ export class SolverWebGPU {
     await this.leituraForca.mapAsync(GPUMapMode.READ);
     const v = new Float32Array(this.leituraForca.getMappedRange().slice(0));
     this.leituraForca.unmap();
+    /* A quarta componente é a metade da diferença, em x, entre a força vista
+     * pelo estado atual e pelo anterior: a amplitude do modo de período 2, se
+     * houver (ver shaderForcas). Zero quando o campo é de fato estacionário. */
+    this.oscilacaoForca = v[3];
     const o = this.offsetForca ?? [0, 0, 0];
     return [v[0] - o[0], v[1] - o[1], v[2] - o[2]];
   }

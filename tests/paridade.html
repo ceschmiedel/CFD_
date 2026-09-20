@@ -1,0 +1,338 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CFD2026 — paridade da força</title>
+<style>
+  body { font: 13px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace;
+         background: #0e1014; color: #d6dae2; margin: 0; padding: 24px 28px; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .04em;
+       text-transform: uppercase; color: #7b8496; margin: 0 0 6px; }
+  h2 { font-size: 13px; font-weight: 600; color: #d6dae2; margin: 24px 0 6px;
+       border-bottom: 1px solid #232833; padding-bottom: 5px; }
+  p.nota { color: #7b8496; max-width: 80ch; margin: 4px 0 14px; }
+  table { border-collapse: collapse; margin: 4px 0; }
+  td, th { padding: 2px 16px 2px 0; text-align: left; vertical-align: top; }
+  td:first-child, th:first-child { color: #7b8496; white-space: nowrap; }
+  th { color: #5d6473; font-weight: 400; border-bottom: 1px solid #232833; }
+  .ok { color: #4ec9a0; } .instavel { color: #e0af68; } .falha { color: #f0616d; }
+  .num { color: #94c8ff; }
+  @media (max-width: 640px) {
+    body { padding: 16px 14px; }
+    table { display: block; max-width: 100%; overflow-x: auto; }
+  }
+</style>
+<h1>CFD2026 — a força não pode depender do passo em que se lê</h1>
+<p class="nota">Num escoamento estacionário, ler a força no passo <em>n</em> ou no passo
+<em>n</em>+1 tem de dar o mesmo número. Não dava: com o cubo sobre a esteira a ω = 1,90 o
+arrasto por passo alternava entre +2,93 e −1,62 unidades de lattice, porque o campo perto do
+canto entre a esteira e a face frontal do corpo tem um modo numérico de período 2 —
+sobre-relaxação a ω ≈ 2 num ponto de estagnação alimentado pelo piso em movimento. Esta página
+mede três coisas por caso: se a força <b>publicada</b> depende da paridade (não pode), a
+amplitude do modo no campo (diagnóstico), e, no cubo, a contraprova por integração de pressão
+nas faces.</p>
+<div id="saida">iniciando…</div>
+
+<script>
+window.__erro = null;
+addEventListener('unhandledrejection', e => {
+  window.__erro = String(e.reason && e.reason.stack || e.reason);
+  document.body.insertAdjacentHTML('beforeend',
+    '<pre style="color:#f0616d;white-space:pre-wrap">' + window.__erro + '</pre>');
+});
+addEventListener('error', e => {
+  window.__erro = String(e.error && e.error.stack || e.message);
+  document.body.insertAdjacentHTML('beforeend',
+    '<pre style="color:#f0616d;white-space:pre-wrap">' + window.__erro + '</pre>');
+});
+</script>
+<script type="module">
+import { sondar, PRESETS } from '../src/backend/caps.js';
+import { SolverWebGPU } from '../src/backend/webgpu/solver.js';
+import { SolverWebGL2 } from '../src/backend/webgl2/solver.js';
+import { Units } from '../src/core/units.js';
+import { montarTipos, corpoAnalitico, areaFrontalCorpo } from '../src/core/tunel.js';
+import { CELULA } from '../src/core/emit/ir.js';
+import { CS2 } from '../src/core/lattice.js';
+import { CASOS, uLbParaOmega } from '../src/core/validacao.js';
+import { voxelizar } from '../src/geom/voxel.js';
+import { ler } from '../src/geom/parse.js';
+import { preparar } from '../src/geom/prepare.js';
+
+const out = document.getElementById('saida');
+const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const el = h => { const d = document.createElement('div'); d.innerHTML = h; out.appendChild(d); return d; };
+const fmt = (v, n = 4) => Number.isFinite(v) ? v.toFixed(n) : '—';
+const pct = v => Number.isFinite(v) ? `${(v * 100).toFixed(2)}%` : '—';
+const tick = () => new Promise(r => setTimeout(r));
+out.textContent = '';
+
+/* ─────────────────────────────────────────────────────────────── backend */
+
+const caps = await sondar();
+const pedido = new URLSearchParams(location.search).get('backend');
+const gpu = caps.backends.find(b => b.id === 'webgpu');
+const gl2 = caps.backends.find(b => b.id === 'webgl2');
+const BACKEND = (pedido === 'webgl2' && gl2?.disponivel) ? 'webgl2'
+  : gpu?.disponivel ? 'webgpu' : (gl2?.disponivel ? 'webgl2' : null);
+if (!BACKEND) throw new Error('nem WebGPU nem WebGL2 nesta máquina');
+
+let device = null, glCtx = null;
+if (BACKEND === 'webgpu') device = await SolverWebGPU.criarDevice(gpu.adapter);
+else glCtx = SolverWebGL2.criarContexto();
+
+const criarSolver = (grade) => BACKEND === 'webgl2'
+  ? SolverWebGL2.criar(glCtx, grade)
+  : SolverWebGPU.criar(device, grade);
+
+const outro = BACKEND === 'webgl2' ? 'webgpu' : 'webgl2';
+el(`<p class="nota">Rodando em <b style="color:#94c8ff">${BACKEND === 'webgl2'
+  ? 'WebGL2 (fragment)' : 'WebGPU (compute)'}</b> — ` +
+  `<a href="?${outro === 'webgl2' ? 'backend=webgl2' : ''}" style="color:#7fa9d8">` +
+  `rodar em ${outro}</a>.</p>`);
+
+const barra = el('<div></div>');
+const progresso = t => { barra.innerHTML = `<span style="color:#7b8496">${esc(t)}</span>`; };
+
+/* ─────────────────────────────────────────────────────────────── os casos */
+
+/*
+ * O cubo de referência, como o app o monta no preset Mínima: voxelizado do
+ * STL, sobre o piso, com esteira, LES e a rampa de partida. É o caso em que o
+ * modo foi visto — e é o caso que o app mostra a quem escolhe "Cubo".
+ */
+const preset = PRESETS.find(p => p.id === 'minima');
+const gradeCubo = { nx: preset.nx, ny: preset.ny, nz: preset.nz };
+const malha = ler(await (await fetch('../examples/cube_example.stl')).arrayBuffer(), 'cube_example.stl');
+const prep = preparar(malha, gradeCubo, { celulasPorComprimento: preset.celulasNoCorpo });
+const voxCubo = voxelizar(prep.positions, prep.indices, gradeCubo);
+
+function casoCubo({ id, nome, esteira, omega }) {
+  const units = new Units({
+    lengthM: 2.0, speedMs: 30, cellsPerLength: preset.celulasNoCorpo,
+    uLb: 0.05, rollingRoad: esteira, lesCs: 0.1,
+  });
+  const { tipo, esponja } = montarTipos({ grade: gradeCubo, corpo: voxCubo.tipo, esteira });
+  const uLb = units.uLb;
+  return {
+    id, nome, grade: gradeCubo, tipo, corpo: voxCubo.tipo, uLb,
+    omega: omega ?? units.omegaPlus, lesCs: 0.1, esteira, esponja,
+    inletU: [uLb, 0, 0], beltU: esteira ? [uLb, 0, 0] : [0, 0, 0],
+    rampa: true, travessias: 4,
+    area: areaFrontalCorpo(voxCubo.tipo, gradeCubo), pressao: true,
+  };
+}
+
+/* A esfera da suíte de validação, em ar livre: sem piso, sem esteira, sem
+ * LES. Se o modo aparecesse aqui, a validação canônica estaria contaminada
+ * sem ninguém saber — ela amostra a cada 100 passos, sempre na mesma
+ * paridade. */
+function casoEsfera() {
+  const c = CASOS.find(k => k.id === 'esfera-re100');
+  const grade = c.grade, D = c.diametroCelulas;
+  const uLb = uLbParaOmega(c.re, D, 1.90);
+  const nuLb = uLb * D / c.re;
+  const omega = 1 / (nuLb / (1 / 3) + 0.5);
+  const corpo = corpoAnalitico(grade, {
+    tipo: 'esfera', cx: grade.nx * 0.30, cy: grade.ny * 0.5, cz: grade.nz * 0.5, raio: D / 2,
+  });
+  const { tipo, esponja } = montarTipos({ grade, corpo, esteira: false });
+  for (let y = 0; y < grade.ny; y++) for (let x = 1; x < grade.nx - 1; x++) {
+    tipo[(0 * grade.ny + y) * grade.nx + x] = CELULA.ESPELHO_Z;
+  }
+  return {
+    id: 'esfera-re100', nome: 'Esfera Re 100, ar livre', grade, tipo, corpo, uLb,
+    omega, lesCs: 0, esteira: false, esponja,
+    inletU: [uLb, 0, 0], beltU: [0, 0, 0],
+    rampa: false, travessias: 2,
+    area: areaFrontalCorpo(corpo, grade), pressao: false,
+  };
+}
+
+const casos = [
+  /* ω explícito nos dois primeiros: o de 1,90 é o caso em que o modo foi
+   * visto e continua aqui como registro; o teto do app é o de units.js. */
+  casoCubo({ id: 'cubo-esteira-190', nome: 'Cubo sobre a esteira, ω = 1,90', esteira: true, omega: 1.90 }),
+  casoCubo({ id: 'cubo-esteira-app', nome: 'Cubo sobre a esteira, ω do app', esteira: true }),
+  casoCubo({ id: 'cubo-piso-parado', nome: 'Cubo, piso parado, ω = 1,90', esteira: false, omega: 1.90 }),
+  casoEsfera(),
+];
+
+/* ─────────────────────────────────────────────────────────── a medição */
+
+const media = v => v.reduce((a, b) => a + b, 0) / v.length;
+
+/**
+ * Integração de pressão nas faces do corpo normais a x.
+ *
+ * Só para o cubo: as faces são planos de lattice e a normal é exata. Soma
+ * c_s² δ nas células de fluido encostadas na face de montante (empurra o
+ * corpo para +x) e subtrai nas da face de jusante. Não conta o atrito, então
+ * a troca de momento deve dar um pouco MAIS que isto — e nunca menos.
+ */
+function pressaoEmX(m, corpo, tipo, grade) {
+  const { nx, ny, nz } = grade;
+  let F = 0;
+  for (let z = 1; z < nz - 1; z++) for (let y = 1; y < ny - 1; y++) for (let x = 1; x < nx - 1; x++) {
+    const c = (z * ny + y) * nx + x;
+    if (tipo[c] !== CELULA.FLUIDO) continue;
+    const d = CS2 * m[4 * c + 3];
+    if (corpo[c + 1] !== 0) F += d;     // sólido a jusante: esta célula está na face frontal
+    if (corpo[c - 1] !== 0) F -= d;     // sólido a montante: face de trás
+  }
+  return F;
+}
+
+async function rodarCaso(caso) {
+  const t0 = performance.now();
+  const { grade, uLb } = caso;
+  const s = await criarSolver(grade);
+  s.definirTipos(caso.tipo);
+  const conf = (f = 1) => s.configurar({
+    omegaPlus: caso.omega, lesCs: caso.lesCs, esponja: caso.esponja,
+    inletU: caso.inletU.map(v => v * f), beltU: caso.beltU.map(v => v * f),
+  });
+  conf(1);
+  await s.calibrarRepouso();
+  if (caso.rampa) s.rampa(Math.round(grade.nx / uLb), f => conf(f));
+  s.inicializar();
+
+  const travessia = Math.ceil(grade.nx / uLb);
+  const transiente = Math.round(caso.travessias * travessia);
+  for (let k = 0; k < transiente; k += 1000) {
+    s.passo(Math.min(1000, transiente - k));
+    progresso(`${caso.nome}: transiente ${(100 * k / transiente).toFixed(0)}%`);
+    await tick();
+  }
+
+  /* 1. Oito leituras consecutivas, um passo entre cada. */
+  const leituras = [], oscs = [];
+  for (let k = 0; k < 8; k++) {
+    s.passo(1);
+    const f = await s.medirForcas();
+    leituras.push(f[0]);
+    oscs.push(s.oscilacaoForca ?? NaN);
+  }
+  const pares = leituras.filter((_, i) => i % 2 === 0);
+  const impares = leituras.filter((_, i) => i % 2 === 1);
+  const fMedia = media(leituras);
+  const difParidade = Math.abs(media(pares) - media(impares)) / Math.max(Math.abs(fMedia), 1e-12);
+  const oscCampo = media(oscs.map(Math.abs)) / Math.max(Math.abs(fMedia), 1e-12);
+  const naoFinito = leituras.some(v => !Number.isFinite(v));
+
+  /* 2. O campo macroscópico em passos consecutivos: um modo de período 2
+   *    aparece como |Δu| grande entre t e t+1 e pequeno entre t e t+2. */
+  const m1 = await s.lerMacros();
+  s.passo(1); const m2 = await s.lerMacros();
+  s.passo(1); const m3 = await s.lerMacros();
+  let d1 = 0, d2 = 0, onde = 0;
+  for (let c = 0; c < s.N; c++) {
+    for (let j = 0; j < 3; j++) {
+      const a = Math.abs(m1[4 * c + j] - m2[4 * c + j]);
+      if (a > d1) { d1 = a; onde = c; }
+      d2 = Math.max(d2, Math.abs(m1[4 * c + j] - m3[4 * c + j]));
+    }
+  }
+  const { nx, ny } = grade;
+  const pos = { x: onde % nx, y: Math.floor(onde / nx) % ny, z: Math.floor(onde / (nx * ny)) };
+
+  /* 3. Contraprova por pressão, no cubo. */
+  const q = 0.5 * uLb * uLb * caso.area;
+  const cdForca = fMedia / q;
+  const cdPressao = caso.pressao ? pressaoEmX(m3, caso.corpo, caso.tipo, grade) / q : NaN;
+
+  s.destruir();
+  return {
+    caso, pares, impares, fMedia, difParidade, oscCampo, naoFinito,
+    d1, d2, pos, cdForca, cdPressao, passos: transiente + 10,
+    segundos: (performance.now() - t0) / 1000,
+  };
+}
+
+/* ─────────────────────────────────────────────────────────────── a tabela */
+
+el('<h2>Leituras consecutivas, um passo entre cada</h2>');
+const tabela = el('<div></div>');
+const resumo = [];
+const linhas = [];
+
+function render() {
+  tabela.innerHTML = '<table><tr><th>caso</th><th>ω⁺</th><th>passos</th>' +
+    '<th>leituras pares (F<sub>x</sub>)</th><th>ímpares</th><th>média</th>' +
+    '<th>par − ímpar</th><th>modo no campo</th>' +
+    '<th>|Δu| t→t+1</th><th>|Δu| t→t+2</th><th>onde</th>' +
+    '<th>C<sub>d</sub> força</th><th>C<sub>d</sub> pressão</th><th>tempo</th></tr>' +
+    linhas.map(r => {
+      const cP = r.naoFinito ? 'falha' : (r.difParidade < 0.01 ? 'ok' : 'falha');
+      const cO = r.naoFinito ? 'falha' : (r.oscCampo < 0.05 ? 'ok' : 'instavel');
+      return `<tr><td>${esc(r.caso.nome)}</td>` +
+        `<td class="num">${r.caso.omega.toFixed(3)}</td>` +
+        `<td class="num">${r.passos.toLocaleString('pt-BR')}</td>` +
+        `<td class="num">${r.pares.map(v => fmt(v, 4)).join(' ')}</td>` +
+        `<td class="num">${r.impares.map(v => fmt(v, 4)).join(' ')}</td>` +
+        `<td class="num">${fmt(r.fMedia, 4)}</td>` +
+        `<td class="${cP}">${pct(r.difParidade)}</td>` +
+        `<td class="${cO}">±${pct(r.oscCampo)}</td>` +
+        `<td class="num">${r.d1.toExponential(2)}</td>` +
+        `<td class="num">${r.d2.toExponential(2)}</td>` +
+        `<td class="num">(${r.pos.x}, ${r.pos.y}, ${r.pos.z})</td>` +
+        `<td class="num">${fmt(r.cdForca, 3)}</td>` +
+        `<td class="num">${fmt(r.cdPressao, 3)}</td>` +
+        `<td class="num">${r.segundos.toFixed(0)} s</td></tr>`;
+    }).join('') + '</table>';
+}
+
+for (const caso of casos) {
+  const r = await rodarCaso(caso);
+  linhas.push(r);
+  render();
+  await tick();
+
+  resumo.push({
+    nome: `${caso.nome}: força independente da paridade`,
+    estado: r.naoFinito ? 'falha' : (r.difParidade < 0.01 ? 'ok' : 'falha'),
+    det: r.naoFinito ? 'NaN/Inf na força'
+      : `pares ${fmt(media(r.pares), 4)} vs ímpares ${fmt(media(r.impares), 4)} (${pct(r.difParidade)})`,
+  });
+  resumo.push({
+    nome: `${caso.nome}: campo sem modo de período 2`,
+    estado: r.naoFinito ? 'falha' : (r.oscCampo < 0.05 ? 'ok' : 'instavel'),
+    det: `amplitude ±${pct(r.oscCampo)} da força; |Δu| ${r.d1.toExponential(2)} entre passos ` +
+      `consecutivos, ${r.d2.toExponential(2)} a dois passos, pico em (${r.pos.x}, ${r.pos.y}, ${r.pos.z})`,
+  });
+  if (caso.pressao) {
+    const razao = r.cdForca / r.cdPressao;
+    resumo.push({
+      nome: `${caso.nome}: troca de momento vs integração de pressão`,
+      estado: (razao > 0.9 && razao < 1.5) ? 'ok' : 'falha',
+      det: `Cd força ${fmt(r.cdForca, 3)}, Cd pressão ${fmt(r.cdPressao, 3)} (razão ${fmt(razao, 2)}; ` +
+        'a força inclui o atrito, a pressão não)',
+    });
+  }
+}
+progresso('');
+
+el('<p class="nota"><b>par − ímpar</b> é a diferença entre as médias das leituras em passos pares e ' +
+   'ímpares, relativa à média — tem de ser zero, porque a força publicada soma os dois estados ' +
+   'pós-colisão (t e t−1). <b>modo no campo</b> é a metade da diferença entre esses dois estados, ' +
+   'que o kernel devolve junto: é a amplitude do modo de período 2 nas populações da superfície, ' +
+   'e é o que a interface mostra como "modo de paridade". <b>|Δu|</b> é a maior variação de ' +
+   'velocidade numa célula entre passos consecutivos e a dois passos: com o modo, a primeira é ' +
+   'grande e a segunda é ruído de máquina.</p>');
+
+el('<h2>Resumo</h2>');
+const nOk = resumo.filter(r => r.estado === 'ok').length;
+const nInst = resumo.filter(r => r.estado === 'instavel').length;
+const nFalha = resumo.filter(r => r.estado === 'falha').length;
+el('<table>' + resumo.map(r =>
+  `<tr><td class="${r.estado}">${r.estado === 'ok' ? '✓' : r.estado === 'instavel' ? '~' : '✗'}</td>` +
+  `<td>${esc(r.nome)}</td><td style="color:#7b8496">${esc(r.det)}</td></tr>`).join('') +
+  '</table>');
+el(`<p class="nota"><b>${nOk} ok · ${nInst} com modo de período 2 · ${nFalha} falhas</b>. ` +
+   'O modo no campo não é falha do medidor: é uma instabilidade numérica marginal a ω = 1,90 no ' +
+   'canto entre a esteira e a face frontal do corpo. Ele some com o piso parado e a ω ≤ 1,85 — que ' +
+   'é o teto do app desde que isto foi medido —, e a força publicada não depende dele de qualquer ' +
+   'forma. O caso a 1,90 fica como registro do que se vê quando ele existe.</p>');
+
+window.__paridade = { backend: BACKEND, linhas: linhas.map(r => ({ ...r, caso: { id: r.caso.id, nome: r.caso.nome, omega: r.caso.omega } })), resumo };
+window.__fim = true;
+</script>

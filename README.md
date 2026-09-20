@@ -119,6 +119,7 @@ Williamson & Brown 1998 / Roshko 1954 (Strouhal), Maskell para bloqueio
 |---|---|
 | `tests/nucleo.html` | Invariantes D3Q19, escoamento uniforme preservado a 1,9e-8, viscosidade medida por decaimento de onda de cisalhamento (0,04–1,07 % de erro em ω de 0,6 a 1,8), conservação de massa |
 | `tests/geometria.html` | Leitura dos seis modelos do repositório, voxelização, silhuetas em corte |
+| `tests/paridade.html` | A força não pode depender do passo em que se lê: oito leituras consecutivas, médias em passos pares e ímpares, amplitude do **modo de período 2** no campo, e a contraprova do cubo por integração de pressão — nos dois backends (`?backend=webgl2`) |
 | `tests/estabilidade.html` | Onde o solver perde estabilidade **com um carro dentro** |
 | `tests/desempenho.html` | MLUPS e banda efetiva por preset, nos dois backends (`?backend=webgl2`) |
 | `tests/webgl2.html` | O caminho WebGL2 inteiro: os cinco shaders compilam no driver desta máquina, escoamento uniforme preservado, viscosidade medida por decaimento de onda, e o **confronto com o WebGPU** no mesmo caso — campo e força lado a lado |
@@ -240,6 +241,12 @@ triângulo-caixa marca a casca, inundação a partir da borda decide o resto.
 pressão **e** atrito viscoso juntos sem reconstruir normal nenhuma a partir de
 uma escada de voxels — e o atrito responde por 10 a 25 % do arrasto de um
 carro. Com populações deslocadas, o termo `2·w_i·c_i` **não** cancela por link.
+E a soma é dos **dois estados pós-colisão**, o atual e o anterior (que, por
+bounce-back, é a população que acabou de voltar da parede), e não o dobro de
+um: centrada em t − ½, ela cancela por construção o modo de período 2 que o
+campo tem a ω = 1,90 no canto entre a esteira e o corpo — ver
+[Limitações](#limitações). O kernel devolve junto a amplitude desse modo, e o
+painel a mostra como "modo de paridade" quando passa de 2 %.
 
 **Fumaça: rake, não névoa.** Um volume homogêneo não tem contraste. Todo túnel
 físico usa um pente de tubos finos soltando filamentos paralelos, e o que se vê
@@ -348,17 +355,36 @@ painel para quando não acertar.
 
 ## Limitações
 
-**O C<sub>d</sub> de veículo não converge.** É o problema aberto principal. O
-valor é finito e a barra de erro **cresce** com o tempo em vez de encolher. A
-causa provável está visível no painel: com o teto de ω em 1,90, o Re do lattice
-cai para ~180, e a 180 um corpo rombudo tem C<sub>d</sub> genuinamente alto e
-esteira muito instável. Se for isso, o remédio é mais células no corpo — não
-mais passos. Corpos canônicos (esfera, cilindro) convergem e validam.
+**Modo de período 2 na esteira, a ω = 1,90.** Com o cubo de referência sobre
+a esteira, o campo perto do canto entre o piso em movimento e a face frontal do
+corpo alterna entre dois estados a cada passo: |Δu| de 0,047 entre passos
+consecutivos, contra 0,05 de corrente livre, e 7e-8 a dois passos. É
+sobre-relaxação a ω ≈ 2 num ponto de estagnação alimentado pelo piso — some
+com o piso parado e a ω ≤ 1,85, e Λ = ¼ piora. A força lida num só estado
+alternava entre +2,93 e −1,62 unidades de lattice conforme a paridade do passo
+(uma auditoria externa mediu o mesmo e o atribuiu ao duplo buffer; não é: os
+dois lados são lidos no lugar certo, o campo é que oscila). A força publicada
+soma os dois estados e não depende mais da paridade; o painel mostra a
+amplitude do modo quando ele existe, e `tests/paridade.html` mede tudo isso.
+O teto de ω do app baixou de 1,90 para 1,85 por causa disso: mata o modo e
+custa ~35 % de Reynolds resolvido, que a esta distância do Re real não muda a
+classe de validade de nada. O caso a 1,90 continua na suíte como registro.
 
-**Backend WebGL2 não implementado.** A sondagem e o emissor de shaders estão
-prontos; falta o runtime (empacotamento das 19 populações em 5 texturas
-RGBA32F e atlas 2D do lattice 3D). Até lá, sem WebGPU o app mostra um aviso
-explicando o porquê.
+**O C<sub>d</sub> de veículo não converge.** É o problema aberto principal. O
+valor é finito e a barra de erro **crescia** com o tempo em vez de encolher —
+parte disso era o modo acima, amostrado ora numa paridade ora na outra
+conforme o número de passos por quadro. A parte que sobra está visível no
+painel: com o teto de ω em 1,85, o Re do lattice cai para ~120, e a 120 um
+corpo rombudo tem C<sub>d</sub> genuinamente alto e esteira muito instável. O
+remédio é mais células no corpo — não mais passos. Corpos canônicos (esfera,
+cilindro) convergem e validam.
+
+**O Reynolds é o do lattice, não o do carro.** Um carro real está em Re ~ 10⁷;
+com 32 células no comprimento e ω ≤ 1,85 o lattice resolve Re ~ 120, e o painel
+diz os dois números. O solver entrega a física do Reynolds que alcança, não a do
+que se digitou: para um corpo curvo isso muda o C<sub>d</sub> por um fator de
+dois, e é por isso que o número serve para comparar formas e ver onde o
+escoamento separa, não para prever o consumo de um carro.
 
 **É LES grosseiro, não DNS.** O modelo sub-grid de Smagorinsky fornece a
 dissipação das escalas não resolvidas. É o método que a CFD automotiva

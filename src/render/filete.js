@@ -50,12 +50,12 @@
  * (C.relogio): os pontos correm ao longo da linha, sem picá-la.
  */
 
-import { CENA } from './comum.js';
+import { CENA, TURBO } from './comum.js';
 
 const FIL_STRUCT = `
 struct Fil {
   a: vec4<f32>,   // espaçamento (céls), meia-largura (px), intensidade, M
-  b: vec4<f32>,   // mundo por pixel a 1 de distância, nTubos, _, _
+  b: vec4<f32>,   // mundo por pixel a 1 de distância, nTubos, cor por velocidade (0/1), |u|/U∞ do topo da escala
 };
 @group(0) @binding(3) var<uniform> F: Fil;`;
 
@@ -154,6 +154,7 @@ fn emitir(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 const RENDER = `
 ${CENA}
+${TURBO}
 ${FIL_STRUCT}
 @group(0) @binding(2) var<storage, read> parts: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> cabecas: array<u32>;
@@ -219,9 +220,22 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Saida
    * a corrente livre, e sai direto do campo. */
   let v = length(amostrar(a.xyz).xyz) / max(C.escala.w, 1e-6);
   let acumulo = clamp(0.55 / max(v, 0.25), 0.7, 2.2);
-  /* Branco levemente quente: é a cor de fumaça de glicol sob luz de halogênio,
-   * e fica fora da paleta turbo do Cp de propósito. */
-  o.cor = vec4<f32>(vec3<f32>(1.0, 0.97, 0.92), F.a.z * fade * acumulo);
+  /* Duas leituras do mesmo cordão.
+   *
+   * FUMAÇA: branco levemente quente, a cor de fumaça de glicol sob luz de
+   * halogênio, fora da paleta do Cp de propósito. Diz POR ONDE o ar passa.
+   *
+   * VELOCIDADE: turbo em |u|/U∞, a mesma paleta do Cp na carroceria, e essa
+   * coincidência é a lição — onde o filete fica vermelho (ar acelerado) a
+   * carroceria ao lado fica azul (pressão baixa), que é Bernoulli numa
+   * imagem. O topo da escala é F.b.w (1,5 U∞ por padrão): o ar sobre o teto
+   * de um carro passa de U∞ em uns 30 a 40%, e uma escala de 0 a 1 saturaria
+   * exatamente onde a informação está. O azul da esteira e o azul do nariz
+   * são a mesma cor por motivos diferentes (separação e estagnação), e é a
+   * carroceria que os distingue: vermelha no nariz, azul atrás. */
+  let branco = vec3<f32>(1.0, 0.97, 0.92);
+  let rgb = select(branco, turbo(v / max(F.b.w, 1e-3)), F.b.z > 0.5);
+  o.cor = vec4<f32>(rgb, F.a.z * fade * acumulo);
   return o;
 }
 
@@ -256,6 +270,11 @@ export class Filetes {
        * largura total: um fio, não uma fita. */
       larguraPixels: 0.9,
       intensidade: 0.9,
+      /* Cor por velocidade local, |u|/U∞ na paleta turbo do Cp; false é a
+       * fumaça branca de túnel. Ver o shader de render. */
+      corVelocidade: true,
+      /* |u|/U∞ que atinge o vermelho. 1,5 cobre a aceleração sobre o teto. */
+      escalaCor: 1.5,
     };
   }
 
@@ -406,7 +425,7 @@ export class Filetes {
     const p = this.params;
     const f = new Float32Array(8);
     f.set([p.espacamento, p.larguraPixels, p.intensidade, this.M], 0);
-    f.set([mundoPorPixel, this.nTubos, 0, 0], 4);
+    f.set([mundoPorPixel, this.nTubos, p.corVelocidade ? 1 : 0, p.escalaCor], 4);
     this.device.queue.writeBuffer(this.uFil, 0, f);
   }
 

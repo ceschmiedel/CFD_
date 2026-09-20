@@ -256,6 +256,16 @@ pente é dito em número de tubos (colunas e linhas): a espessura de cada
 filamento sai do espaçamento, então tirar tubos os deixa mais grossos, que é o
 que um pente com menos saídas e a mesma vazão faz.
 
+Os filetes saem **coloridos pela velocidade local**, |u|/U<sub>∞</sub> na
+mesma paleta turbo do C<sub>p</sub> — e a coincidência é a lição: onde o
+filete fica vermelho (ar acelerado) a carroceria ao lado fica azul (pressão
+baixa). O topo da escala é 1,5 U<sub>∞</sub>, porque o ar sobre o teto passa
+de U<sub>∞</sub> em 30 a 40 % e uma escala até 1 saturaria onde a informação
+está; a barra no HUD diz isso. O azul da esteira e o azul do nariz são a mesma
+cor por motivos diferentes, separação e estagnação, e é a carroceria que os
+distingue. O checkbox devolve o branco de fumaça de glicol, que é o que um
+túnel real mostra.
+
 E o filete é **contínuo**. Houve aqui uma emissão pulsada, que dava movimento a
 uma cena estacionária ao custo de picar o filamento em contas — e um filamento
 picado não mostra linha de corrente, que é a única coisa que essa camada existe

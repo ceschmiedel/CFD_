@@ -254,6 +254,7 @@
 
   <h2>visualização</h2>
   <label class="chk"><input type="checkbox" id="oFiletes" checked autocomplete="off"> filetes de fumaça (pente)</label>
+  <label class="chk" style="margin-left:22px"><input type="checkbox" id="oFileteCor" checked autocomplete="off"> coloridos pela velocidade do ar</label>
   <label class="chk"><input type="checkbox" id="oFumaca" autocomplete="off"> fumaça volumétrica</label>
   <label>Densidade da fumaça <span class="val" id="vDens">70</span></label>
   <input type="range" id="dens" min="10" max="240" step="2" value="70" autocomplete="off">
@@ -321,7 +322,7 @@ const PADROES = {
   comprimento: 4.7, velocidade: 30, guinada: 0, dens: 70, ganho: 1,
   colunas: 9, linhas: 6, rasa: 1,
   esteira: true, les: true, inverter: false,
-  oFiletes: true, oFumaca: false, oEsteiras: false, oCorpo: true, oCp: true,
+  oFiletes: true, oFileteCor: true, oFumaca: false, oEsteiras: false, oCorpo: true, oCp: true,
   oRasantes: true,
 };
 function imporPadroes() {
@@ -676,7 +677,7 @@ async function _montar() {
      silêncio os valores de fábrica. Disparar o evento e não escrever o
      parâmetro direto: o mesmo handler escreve o valor E a etiqueta, então os
      dois não têm como divergir. */
-  for (const id of ['colunas', 'linhas', 'dens', 'rasa']) {
+  for (const id of ['colunas', 'linhas', 'dens', 'rasa', 'oFileteCor']) {
     $(id).dispatchEvent(new Event('input'));
   }
 
@@ -801,6 +802,26 @@ function atualizarPainel() {
   }
 }
 
+/*
+ * A escala dos filetes coloridos. Uma linha colorida sem escala é decoração:
+ * o azul da esteira e o azul do nariz parecem a mesma coisa, e a barra é o
+ * que diz que os dois são "ar parado" — por separação num caso, por
+ * estagnação no outro. O gradiente é a paleta turbo do shader, em dez
+ * paradas, e o topo é o mesmo `escalaCor` que o shader usa.
+ */
+const TURBO_CSS = 'linear-gradient(90deg,#30123b,#4662d7,#36aaf9,#1ae4b6,#72fe5e,' +
+  '#c7ef34,#faba39,#f66b19,#ca2a04,#7a0403)';
+function legendaFiletes() {
+  const f = app.renderer?.filetes;
+  if (!f || !app.renderer.opcoes.filetes || !f.params.corVelocidade) return '';
+  const topo = f.params.escalaCor;
+  return `<div style="margin-top:6px">velocidade do ar nos filetes, |u| / U<sub>∞</sub></div>` +
+    `<div style="width:170px;height:7px;border-radius:2px;background:${TURBO_CSS};margin:3px 0 1px"></div>` +
+    `<div style="display:flex;justify-content:space-between;width:170px;color:var(--tenue)">` +
+    `<span>0</span><span>1 (U<sub>∞</sub>)</span>` +
+    `<span>${topo.toFixed(1).replace('.', ',')}</span></div>`;
+}
+
 function laco() {
   requestAnimationFrame(laco);
   if (!app.solver || montando) return;
@@ -839,7 +860,8 @@ function laco() {
         ? `acelerando o túnel: <b>${(app.solver.fatorRampa * 100).toFixed(0)}%</b><br>` : '') +
       `travessias do domínio: <b>${(app.solver.passos / trav).toFixed(2)}</b>` +
       (app.solver.passos / trav < 3
-        ? ` <span style="color:var(--alerta)">— abaixo de 3, o Cd ainda é transiente</span>` : '');
+        ? ` <span style="color:var(--alerta)">— abaixo de 3, o Cd ainda é transiente</span>` : '') +
+      legendaFiletes();
     $('estado').textContent = app.rodando
       ? (ehToque.matches
           ? 'arraste para girar · pinça para aproximar'
@@ -887,6 +909,12 @@ $('oEsteiras').onchange = e => { app.renderer.opcoes.esteiras = e.target.checked
 $('oFumaca').onchange = e => { app.renderer.opcoes.fumaca = e.target.checked; };
 /* Só existe no caminho WebGPU por enquanto; no WebGL2 o checkbox não faz nada. */
 $('oFiletes').onchange = e => { app.renderer.opcoes.filetes = e.target.checked; };
+/* `input` e não `change`: é o evento que a remontagem dispara para reaplicar
+   os controles sobre filetes recém-criados, e um checkbox o emite ao clicar. */
+$('oFileteCor').oninput = e => {
+  const f = app.renderer?.filetes;
+  if (f) f.params.corVelocidade = e.target.checked;
+};
 /* Os deslizadores de visualização são disparados por imporPadroes() no
    `pageshow`, que pode chegar antes de haver renderizador ou volume montado —
    daí os acessos opcionais. A etiqueta é escrita de qualquer forma: ela mostra

@@ -52,6 +52,19 @@ A resolução inicial é escolhida mais baixa em telas pequenas — uma GPU móv
 passa nos limites declarados de presets que ela não consegue avançar em tempo
 útil. As outras continuam na lista, com o tamanho de cada uma.
 
+### Relatório da corrida
+
+O botão **relatório da corrida**, no painel de medidas, libera depois de
+3 travessias do domínio e 60 amostras de C<sub>d</sub> — antes disso o número
+é o do transiente de partida, e um relatório de transiente é um relatório de
+nada. Ele abre por cima do app um documento autocontido, imprimível em PDF,
+com um **selo de validade** em cima da página (inválido, inconclusivo,
+instável, qualitativo ou resolvido), o C<sub>d</sub> com desvio e a série da
+janela, o Reynolds pedido e o que o lattice de fato resolve, o setup inteiro,
+a cena, as limitações e o JSON dos dados para baixar. Nenhuma corrida no
+navegador sai como quantitativa validada, e o relatório diz isso antes do
+número, não numa nota de rodapé. O código está em `src/relatorio.js`.
+
 ## Publicar (Vercel)
 
 Site estático puro: **sem build, sem dependências, sem passo de instalação**. O

@@ -56,6 +56,8 @@
   button.primaria { background: #1b2734; border-color: #2c4055; color: #cfe6ff; }
   input[type=range] { width: 100%; accent-color: #4a7fb5; margin: 2px 0 0; }
   .linha { display: flex; gap: 6px; }
+  button:disabled { opacity: .45; cursor: default; }
+  #relatorioEstado { color: var(--tenue); font-size: 10.5px; margin-top: 3px; }
   .chk { display: flex; align-items: center; gap: 7px; color: var(--fraco);
          margin: 7px 0; cursor: pointer; }
   .chk input { accent-color: #4a7fb5; cursor: pointer; }
@@ -251,6 +253,9 @@
   <div class="medida"><span>área frontal</span><b id="area">—</b></div>
   <div class="medida"><span>bloqueio</span><b id="bloqueio">—</b></div>
   <div id="veredito">—</div>
+  <button id="relatorio" class="primaria" style="margin-top:9px;width:100%" disabled
+          title="disponível depois de 3 travessias do domínio e 60 amostras de Cd">📄 relatório da corrida</button>
+  <div id="relatorioEstado">disponível depois de 3 travessias e 60 amostras</div>
 
   <h2>visualização</h2>
   <label class="chk"><input type="checkbox" id="oFiletes" checked autocomplete="off"> filetes de fumaça (pente)</label>
@@ -303,6 +308,7 @@ import { voxelizar } from './src/geom/voxel.js';
 import { ler } from './src/geom/parse.js';
 import { preparar } from './src/geom/prepare.js';
 import { coeficientes, JanelaCd } from './src/core/forces.js';
+import * as Relatorio from './src/relatorio.js';
 import { Renderer } from './src/render/renderer.js';
 import { RendererWebGL2 } from './src/render/webgl2/renderer.js';
 
@@ -591,6 +597,7 @@ async function carregarModelo(fonte, nome) {
     ? fonte
     : await baixarComProgresso('examples/' + encodeURIComponent(fonte), nome);
   app.malha = ler(buf, nome);
+  app.nomeArquivo = nome;
   await montar();
 }
 
@@ -800,7 +807,47 @@ function atualizarPainel() {
     const A = app.areaFrontal * app.units.dx * app.units.dx;
     $('arrasto').textContent = `${(cd * q * A).toFixed(1)} N`;
   }
+  /* O relatório só existe depois do transiente: antes disso ele relataria o
+     Cd da partida, que não é o Cd de nada. O botão mostra o que falta. */
+  const pr = Relatorio.prontidao(app);
+  $('relatorio').disabled = !pr.pronto;
+  $('relatorioEstado').textContent = pr.pronto
+    ? `pronto: ${pr.travessias.toFixed(1).replace('.', ',')} travessias, ${pr.amostras} amostras`
+    : `disponível depois de ${Relatorio.MINIMOS.travessias} travessias e ` +
+      `${Relatorio.MINIMOS.amostras} amostras (${pr.motivo})`;
 }
+
+/*
+ * A cena para o relatório. Um canvas WebGPU só guarda a imagem até o fim da
+ * tarefa em que foi desenhada, então desenhamos e lemos no MESMO tique; se
+ * o navegador devolver um quadro vazio, o relatório sai sem imagem e diz o
+ * resto do mesmo jeito.
+ */
+function capturarCena() {
+  try {
+    app.renderer.desenhar({ uRef: app.units?.uLb ?? 0.05 });
+    return $('tela').toDataURL('image/jpeg', 0.85);
+  } catch { return ''; }
+}
+
+$('relatorio').onclick = () => {
+  if (!Relatorio.prontidao(app).pronto) return;
+  /* O nome de exibição para os modelos da lista; o nome do arquivo para os
+     carregados pelo usuário. */
+  const m = MODELOS.find(x => x.id === app.nomeArquivo);
+  const { html } = Relatorio.gerar(app, {
+    modelo: m?.nome ?? app.nomeArquivo ?? '—',
+    backend: BACKEND,
+    gpu: $('vBackend').textContent,
+    imagem: capturarCena(),
+    url: location.origin + location.pathname,
+    controles: {
+      velocidade: +$('velocidade').value, comprimento: +$('comprimento').value,
+      guinada: +$('guinada').value, esteira: $('esteira').checked, les: $('les').checked,
+    },
+  });
+  Relatorio.abrir(html);
+};
 
 /*
  * A escala dos filetes coloridos. Uma linha colorida sem escala é decoração:
